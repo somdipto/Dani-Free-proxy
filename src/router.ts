@@ -891,7 +891,6 @@ export class Router {
   private async completeWithFailover(request: ChatRequest, attempts: Route[], signal: AbortSignal): Promise<Response> {
     const failures: AttemptFailure[] = [];
     const required = requiredCapabilities(request);
-    const streaming = request.stream === true;
 
     for (let index = 0; index < attempts.length; index += 1) {
       const route = attempts[index];
@@ -964,10 +963,14 @@ export class Router {
         return withModelHeader(response, selector);
       }
 
-      // 2xx: guard against the empty-content quirk on non-stream JSON bodies.
-      // Streaming responses relay bytes as they arrive, so once the first byte
-      // is handed to the client there is no failing over.
-      if (!streaming && isJsonResponse(response)) {
+      // 2xx: guard against the empty-content quirk, error envelopes, invalid
+      // JSON, and oversized bodies on JSON responses — streaming requests
+      // included. No response bytes have reached the client yet at this point,
+      // so there is no failing-over-after-emission here: real SSE streams
+      // still relay untouched below (isJsonResponse is false for
+      // text/event-stream), while an anomalous JSON body fails over instead
+      // of being served to the client as a successful answer.
+      if (isJsonResponse(response)) {
         let text: string;
         let oversize = false;
         try {

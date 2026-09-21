@@ -535,6 +535,62 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual(["a", "b"]);
   });
 
+  it("fails over on a streaming request when an upstream answers 200 with an error envelope", async () => {
+    const calls: string[] = [];
+    const envelope = { error: { message: "capacity exhausted, try again", type: "server_error" } };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        return Response.json(request.model === "a" ? envelope : full);
+      })],
+    });
+    const response = await router.handle(chat("auto", { stream: true }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(full);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("fails over on a streaming request when an upstream answers 200 with empty content", async () => {
+    const calls: string[] = [];
+    const empty = { choices: [{ message: { content: "   " }, finish_reason: "stop" }] };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        return Response.json(request.model === "a" ? empty : full);
+      })],
+    });
+    const response = await router.handle(chat("auto", { stream: true }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(full);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("fails over on a streaming request when an upstream answers 200 with an invalid JSON body", async () => {
+    const calls: string[] = [];
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        if (request.model === "a") {
+          return new Response("{not json", { headers: { "content-type": "application/json" } });
+        }
+        return Response.json(full);
+      })],
+    });
+    const response = await router.handle(chat("auto", { stream: true }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(full);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
   it("reports the joined array-envelope message in the final 503", async () => {
     const router = createRouter({
       failoverBackoffMs: 1,
