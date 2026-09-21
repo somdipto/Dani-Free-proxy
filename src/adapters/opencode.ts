@@ -536,7 +536,7 @@ export class OpenCodeAdapter implements BackendAdapter {
       const detail = await this.readErrorBody(response);
       throw new OpenCodeError(
         `failed to create OpenCode session: HTTP ${response.status}${detail ? ` — ${detail}` : ""}`,
-        { code: "session_create_failed" },
+        { status: response.status, code: "session_create_failed" },
       );
     }
     let payload: unknown;
@@ -572,7 +572,7 @@ export class OpenCodeAdapter implements BackendAdapter {
       const detail = await this.readErrorBody(response);
       throw new OpenCodeError(
         `OpenCode message failed: HTTP ${response.status}${detail ? ` — ${detail}` : ""}`,
-        { code: "message_failed" },
+        { status: response.status, code: "message_failed" },
       );
     }
     try {

@@ -329,4 +329,50 @@ describe("OpenCodeAdapter", () => {
     expect(health.configured).toBe(true);
     expect(health.reason).toBeUndefined();
   });
+
+  it("carries the sidecar's 429 from session creation so the router backs off", async () => {
+    const stub = (async (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
+      const url = input.toString();
+      if (url.endsWith("/session") && (init.method ?? "GET").toUpperCase() === "POST") {
+        return new Response("slow down", { status: 429, statusText: "Too Many Requests" });
+      }
+      return new Response("not found", { status: 404 });
+    }) as unknown as typeof fetch;
+    const adapter = new OpenCodeAdapter({ baseUrl: BASE, apiKey: "", fetch: stub });
+    const error = await adapter
+      .complete(
+        { model: "opencode/nemotron-3-ultra-free", messages: [{ role: "user", content: "hi" }] },
+        testModel(),
+        new AbortController().signal,
+      )
+      .then(() => undefined, (failure: unknown) => failure);
+    expect(error).toBeInstanceOf(OpenCodeError);
+    expect((error as OpenCodeError).status).toBe(429);
+    expect((error as OpenCodeError).message).toContain("HTTP 429");
+  });
+
+  it("carries the sidecar's 400 from the message endpoint so the router passes it through", async () => {
+    const stub = (async (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
+      const url = input.toString();
+      if (url.endsWith("/session") && (init.method ?? "GET").toUpperCase() === "POST") {
+        return Response.json({ id: "ses_test" });
+      }
+      if (url.endsWith("/session/ses_test/message") && (init.method ?? "GET").toUpperCase() === "POST") {
+        return new Response("bad request", { status: 400, statusText: "Bad Request" });
+      }
+      if (url.endsWith("/session/ses_test")) return new Response("{}", { status: 200 });
+      return new Response("not found", { status: 404 });
+    }) as unknown as typeof fetch;
+    const adapter = new OpenCodeAdapter({ baseUrl: BASE, apiKey: "", fetch: stub });
+    const error = await adapter
+      .complete(
+        { model: "opencode/nemotron-3-ultra-free", messages: [{ role: "user", content: "hi" }] },
+        testModel(),
+        new AbortController().signal,
+      )
+      .then(() => undefined, (failure: unknown) => failure);
+    expect(error).toBeInstanceOf(OpenCodeError);
+    expect((error as OpenCodeError).status).toBe(400);
+    expect((error as OpenCodeError).message).toContain("HTTP 400");
+  });
 });
