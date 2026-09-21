@@ -144,7 +144,7 @@ kilo/nex-agi/nex-n2.5-mini:free
 model: kilo/<model-id>
 ```
 
-The router resolves the explicit selector first. If that attempt fails with a retryable condition (transport error, 408, 429, 5xx, an HTTP 200 with empty content, an HTTP 200 with an invalid JSON body, an HTTP 200 carrying an error envelope, or an HTTP 200 with a body exceeding the 8 MiB buffer cap), the router continues with the rest of the standard OpenCode-first chain. A missing or unhealthy explicit model fails closed without touching the chain. An `opencode/<id>` or `mimo/<id>` request is available only when that adapter is deliberately supplied.
+The router resolves the explicit selector first. If that attempt fails with a retryable condition (transport error, 408, 429, 5xx, an HTTP 200 with empty content, an HTTP 200 with an invalid JSON body, an HTTP 200 carrying an error envelope, or an HTTP 200 with a body exceeding the 8 MiB buffer cap), the router continues with the rest of the standard OpenCode-first chain. A missing or unhealthy explicit model fails closed without touching the chain. An explicit request is answered by whichever backends have an adapter supplied: the standard listener supplies OpenCode and Kilo (defaultAdapters), the Kilo-only listener supplies Kilo, and `mimo/<id>` answers only when that adapter is deliberately supplied.
 
 #### Automatic request
 
