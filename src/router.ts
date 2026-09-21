@@ -437,6 +437,30 @@ function chatCompletionHasContent(payload: unknown): boolean | undefined {
   return false;
 }
 
+/**
+ * Extract the message from an upstream HTTP 200 body that is an OpenAI-style
+ * error envelope (`{ "error": { "message": ... } }`) instead of a completion.
+ * Some gateways signal a refusal with a 200; without this check the envelope
+ * would reach the client as a "successful" 200 and the attempt would count as
+ * answered, so no failover would happen. Returns undefined for a genuine
+ * completion: a real chat completion never carries a top-level error envelope,
+ * so a contentful answer always wins over a stray "error" key.
+ */
+function errorEnvelopeMessage(payload: unknown): string | undefined {
+  if (!isRecord(payload)) return undefined;
+  const error = payload.error;
+  if (!isRecord(error)) return undefined;
+  const message =
+    typeof error.message === "string"
+      ? error.message.trim()
+      : typeof error.detail === "string"
+        ? error.detail.trim()
+        : "";
+  if (!message) return undefined;
+  if (chatCompletionHasContent(payload) === true) return undefined;
+  return message;
+}
+
 interface AttemptFailure {
   model: string;
   reason: string;
@@ -957,6 +981,19 @@ export class Router {
         }
         if (!parseable) {
           failures.push({ model: selector, reason: "upstream returned 200 with an invalid JSON body" });
+          continue;
+        }
+        const envelopeError = errorEnvelopeMessage(payload);
+        if (envelopeError !== undefined) {
+          // A 200 carrying an OpenAI error envelope is a failed attempt, not
+          // an answer: fail over like any other retryable upstream failure.
+          // The message gets the same redaction pass as other failover
+          // reasons, since failover reasons are handed back to the client in
+          // the final 503.
+          failures.push({
+            model: selector,
+            reason: upstreamReason(200, undefined, redactDiagnostics(envelopeError)),
+          });
           continue;
         }
         const content = chatCompletionHasContent(payload);

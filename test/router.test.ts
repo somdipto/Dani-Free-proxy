@@ -483,6 +483,52 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual(["a", "b"]);
   });
 
+  it("fails over when an upstream answers 200 with an OpenAI error envelope", async () => {
+    const calls: string[] = [];
+    const envelope = { error: { message: "capacity exhausted, try again", type: "server_error" } };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        return Response.json(request.model === "a" ? envelope : full);
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(full);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("reports the envelope message in the final 503 when every model answers 200 with an error body", async () => {
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a")], async () =>
+        Response.json({ error: { message: "capacity exhausted", type: "server_error" } }))],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.error.code).toBe("all_models_failed");
+    expect(body.attempts[0].model).toBe("kilo/a");
+    expect(body.attempts[0].reason).toContain("capacity exhausted");
+  });
+
+  it("still serves a contentful 200 answer that happens to carry an error key", async () => {
+    const answer = {
+      choices: [{ message: { content: "real answer" }, finish_reason: "stop" }],
+      error: { message: "stray metadata, not a refusal" },
+    };
+    const router = createRouter({
+      adapters: [adapter("kilo", [model("kilo", "a")], async () => Response.json(answer))],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(answer);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/a");
+  });
+
   it("fails over when an upstream 200 JSON body exceeds the read cap", async () => {
     const calls: string[] = [];
     const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
