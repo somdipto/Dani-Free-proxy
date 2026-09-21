@@ -101,6 +101,6 @@ Dani-Free is an OpenAI-compatible inference proxy. For the OpenCode ids it drive
 
 ## Security
 
-The canonical implementation guide for AI agents and custom model-provider clients is [`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md). It documents the protocol contract, the pinned Kilo selector, setup, OMP, Python, JavaScript, security, failure handling, and an integration checklist.
+The canonical implementation guide for AI agents and custom model-provider clients is [`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md). It documents the protocol contract, the `auto` failover chain and the Kilo-only listener, setup, OMP, Python, JavaScript, security, failure handling, and an integration checklist.
 
 The shorter provider templates remain in [`integrations/`](integrations/), and the operational skill is in [`skills/dani-free/SKILL.md`](skills/dani-free/SKILL.md).

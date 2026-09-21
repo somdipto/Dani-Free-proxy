@@ -90,9 +90,9 @@ Example:
 
 Routing rules:
 
-- `auto` maps to `opencode/muse-spark-1.3-contributor-free` and then uses the same explicit path as that selector.
-- Missing, unhealthy, HTTP 401/429/503, and timeout failures are returned to the caller. The router does not try another model.
-- Explicit selectors fail closed: they never silently switch to another backend or model.
+- `auto` maps to `opencode/nemotron-3-ultra-free` and then walks the OpenCode-first six-model failover chain (OpenCode first, then Kilo).
+- Missing or unhealthy models are skipped. Transport errors, timeouts, 429 (retried after a short backoff), 5xx, and HTTP 200 with empty content fail over to the next model in the chain. A 4xx refusal is passed through to the caller as-is, with an `x-dani-free-model` header naming the model that answered.
+- An explicit selector is tried first, then the remaining models in the chain: explicit selectors fail over too, they do not fail closed.
 - Other `kilo/<id>`, `mimo/<id>`, and `opencode/<id>` selectors are rejected unless the process was started with a custom adapter set and allowlist.
 - An id appearing in `/v1/models` proves discovery, not guaranteed generation. Free-tier capacity can change.
 
@@ -206,7 +206,7 @@ Copy the provider block from `integrations/omp-models.yml` into `~/.omp/agent/mo
 dani-free/auto
 ```
 
-OMP must be able to reach the router before selecting the model. `auto` is the pinned Kilo model. Verify with:
+OMP must be able to reach the router before selecting the model. `auto` is the OpenCode-first failover chain starting at `opencode/nemotron-3-ultra-free`. Verify with:
 
 ```sh
 omp models find dani-free --json
