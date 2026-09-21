@@ -16,10 +16,10 @@ The default listener is `127.0.0.1:4190`. Set `DANI_FREE_HOST` and `DANI_FREE_PO
 
 ## Model selectors and routing
 
-- `auto` starts at `opencode/nemotron-3-ultra-free` and walks the OpenCode-first six-model failover chain. Retryable failures (transport errors, 408, 429 with a brief backoff, 5xx, empty or oversize HTTP 200 bodies) advance to the next model; other 4xx refusals are passed through as-is. A request-deadline timeout or client cancellation never advances: it ends the request with a 504.
+- `auto` starts at `opencode/nemotron-3-ultra-free` and walks the OpenCode-first six-model failover chain. Retryable failures (transport errors, 408, 429 with a brief backoff, 5xx, HTTP 200 with empty content, invalid JSON, an `{"error": …}` envelope — OpenAI-style object, bare-string, or string-array form — or an oversize body) advance to the next model; other 4xx refusals are passed through as-is. A request-deadline timeout or client cancellation never advances: it ends the request with a 504.
 - Standard listener ids: three OpenCode free models, then three Kilo free models.
 - Other `kilo/<id>`, `mimo/<id>`, and `opencode/<id>` values are rejected unless a custom adapter set was supplied.
-- Use an exact model id returned by `/v1/models`. Explicit selectors fail closed.
+- Use an exact model id returned by `/v1/models`. An explicit selector is tried first, then the remaining models in the chain: explicit selectors fail over too, they do not fail closed.
 - Advertised models include `tools` and `reasoning` so OMP coding requests do not 422.
 
 The API is OpenAI-compatible at `/v1/models` and `/v1/chat/completions`. Client cancellation is propagated and terminal.
