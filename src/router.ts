@@ -246,12 +246,13 @@ function responseFromStatusError(error: unknown): Response | undefined {
   const body = typeof error.body === "string" ? error.body : "";
   // An adapter-thrown typed error body (e.g. OpenCodeError.body) is JSON; serve
   // it as JSON so OpenAI-compatible clients can parse the refusal. Plain-text
-  // bodies keep their text/plain label.
-  let json = false;
+  // bodies keep their text/plain label. Named isJson (not json) so it can't be
+  // confused with the module-level json() response helper above.
+  let isJson = false;
   if (body.trim() !== "") {
     try {
       JSON.parse(body);
-      json = true;
+      isJson = true;
     } catch {
       // Plain text stays plain text.
     }
@@ -260,7 +261,7 @@ function responseFromStatusError(error: unknown): Response | undefined {
     status,
     statusText: redactedStatusText,
     headers: {
-      "content-type": json ? "application/json; charset=utf-8" : "text/plain; charset=utf-8",
+      "content-type": isJson ? "application/json; charset=utf-8" : "text/plain; charset=utf-8",
     },
   });
 }
