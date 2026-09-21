@@ -4,7 +4,7 @@ This is the canonical guide for an AI coding agent, developer, or integration au
 
 ## 1. What Dani-Free is
 
-Dani-Free is a local OpenAI-compatible model router. The standard listener lists three OpenCode free ids, then three Kilo free ids. `auto` walks an OpenCode-first six-model failover chain starting at `opencode/nemotron-3-ultra-free`: a missing or unhealthy model is skipped, and a transport error, timeout, 408, 429 (pauses briefly, then advances to the next model), 5xx, or an HTTP 200 with empty content fails over to the next model in the chain. Any other 4xx refusal from the upstream is returned to the caller as-is with an `x-dani-free-model` header naming the model that answered. If every model in the chain fails, the caller gets a 503 `all_models_failed` with per-attempt reasons.
+Dani-Free is a local OpenAI-compatible model router. The standard listener lists three OpenCode free ids, then three Kilo free ids. `auto` walks an OpenCode-first six-model failover chain starting at `opencode/nemotron-3-ultra-free`: a missing or unhealthy model is skipped, and a transport error, timeout, 408, 429 (pauses briefly, then advances to the next model), 5xx, an HTTP 200 with empty content, or an HTTP 200 whose body exceeds the 8 MiB buffer cap fails over to the next model in the chain. Any other 4xx refusal from the upstream is returned to the caller as-is with an `x-dani-free-model` header naming the model that answered. If every model in the chain fails, the caller gets a 503 `all_models_failed` with per-attempt reasons.
 
 ```text
 Dani-Free standard route:
@@ -91,7 +91,7 @@ Example:
 Routing rules:
 
 - `auto` maps to `opencode/nemotron-3-ultra-free` and then walks the OpenCode-first six-model failover chain (OpenCode first, then Kilo).
-- Missing or unhealthy models are skipped. Transport errors, timeouts, 408, 429 (pauses briefly, then advances to the next model), 5xx, and HTTP 200 with empty content fail over to the next model in the chain. Any other 4xx refusal is passed through to the caller as-is, with an `x-dani-free-model` header naming the model that answered.
+- Missing or unhealthy models are skipped. Transport errors, timeouts, 408, 429 (pauses briefly, then advances to the next model), 5xx, HTTP 200 with empty content, and HTTP 200 with a body exceeding the 8 MiB buffer cap fail over to the next model in the chain. Any other 4xx refusal is passed through to the caller as-is, with an `x-dani-free-model` header naming the model that answered.
 - An explicit selector is tried first, then the remaining models in the chain: explicit selectors fail over too, they do not fail closed.
 - Other `kilo/<id>`, `mimo/<id>`, and `opencode/<id>` selectors are rejected unless the process was started with a custom adapter set and allowlist.
 - An id appearing in `/v1/models` proves discovery, not guaranteed generation. Free-tier capacity can change.

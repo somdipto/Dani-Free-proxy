@@ -810,7 +810,8 @@ export class Router {
   /**
    * Walk the chain until one model returns a real answer.
    * Retryable: network errors, upstream timeouts (including HTTP 408), 429, 5xx,
-   * and HTTP 200 with empty/no text content. Never fails over after response bytes
+   * and HTTP 200 with empty/no text content or a body exceeding the
+   * MAX_UPSTREAM_RESPONSE_BYTES buffer cap. Never fails over after response bytes
    * have been emitted to the client. All attempts share the caller's remaining
    * deadline via `signal`.
    */
