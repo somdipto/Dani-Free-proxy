@@ -855,8 +855,13 @@ export class Router {
     const required = requiredCapabilities(request);
     const streaming = request.stream === true;
 
-    for (const route of attempts) {
+    for (let index = 0; index < attempts.length; index += 1) {
+      const route = attempts[index];
       const selector = modelSelectorId(route.model);
+      // The backoff after a 429 exists so the next model starts clean. After
+      // the final attempt there is no next model, so waiting would only delay
+      // the 503 the caller is already going to get.
+      const hasNext = index < attempts.length - 1;
       if (signal.aborted) throw abortError(signal);
       if (!supportsCapabilities(route.model, required)) {
         return structuredError(
@@ -882,7 +887,7 @@ export class Router {
         const status = statusFrom(error);
         if (status === 429) {
           failures.push({ model: selector, status, reason: retryableStatusReason(error, status, "rate limited") });
-          await this.failoverBackoff(signal);
+          if (hasNext) await this.failoverBackoff(signal);
           continue;
         }
         if (status !== undefined && (status === 408 || status >= 500)) {
@@ -906,7 +911,7 @@ export class Router {
           status,
           reason: upstreamReason(status, response.statusText || undefined, await readUpstreamSnippet(response, signal)),
         });
-        await this.failoverBackoff(signal);
+        if (hasNext) await this.failoverBackoff(signal);
         continue;
       }
       if (status === 408 || status >= 500) {

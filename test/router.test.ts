@@ -225,6 +225,32 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual([primaryId, "other"]);
   });
 
+  it("does not wait for the failover backoff after the last model in the chain", async () => {
+    // Fake the timers so a pending backoff would never fire: the request must
+    // still settle, proving no backoff was scheduled after the final attempt.
+    const time = clock();
+    let attempts = 0;
+    const router = createRouter({
+      failoverBackoffMs: 60_000,
+      adapters: [adapter("kilo", [model("kilo", primaryId)], async () => {
+        attempts += 1;
+        return new Response("slow down", { status: 429, statusText: "Too Many Requests" });
+      })],
+    });
+    try {
+      let settled = false;
+      const pending = router.handle(chat()).then((response) => { settled = true; return response; });
+      // Drain the event loop without advancing any router timer.
+      for (let round = 0; round < 25 && !settled; round += 1) await time.flush();
+      expect(settled).toBe(true);
+      const response = await pending;
+      expect(response.status).toBe(503);
+      expect(attempts).toBe(1);
+    } finally {
+      time.restore();
+    }
+  });
+
   it("redacts signed URLs and bearer tokens from upstream error snippets in failover reasons", async () => {
     const leakedUrl = "https://upstream.example/error-page?sig=secret-signature";
     const leakedToken = "sk-leaked-bearer-token";
