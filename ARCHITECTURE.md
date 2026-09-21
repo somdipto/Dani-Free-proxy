@@ -29,10 +29,10 @@ The router is a **model request router**. It is not the owner of OMP's subagent 
 | Concern | Standard `:4190` | Historical Kilo-only canary `:4290` | Future work |
 | --- | --- | --- | --- |
 | Deployment state | current product | earlier isolated experiment | full OMP coding acceptance |
-| Providers | Kilo only; `auto` = `kilo/nex-agi/nex-n2.5-pro:free`; no second-model retry | Kilo only | verified policy snapshot and deeper telemetry |
-| OpenCode boundary | external legacy proxy only; not an ACP bridge or automatic route | not reachable from this service | official ACP integration belongs to an ACP client |
+| Providers | OpenCode-first six-model failover chain; `auto` = `opencode/nemotron-3-ultra-free` | Kilo only | verified policy snapshot and deeper telemetry |
+| OpenCode boundary | first-class provider on the standard listener via the `opencode serve` session bridge; the external legacy proxy is a separate service | not reachable from this service | official ACP integration belongs to an ACP client |
 | Tool fidelity | Kilo request fields pass through unchanged | Kilo request fields pass through unchanged | native OMP edit/test proof |
-| Discovery | five-second per-adapter request cache over the pinned Kilo model | same router cache over Kilo only | asynchronous signed/verified policy |
+| Discovery | five-second per-adapter request cache over the OpenCode-first six-model roster | same router cache over Kilo only | asynchronous signed/verified policy |
 | Billing admission | server allowlist pins the primary model | live Kilo catalogue zero prompt/completion price filtering | all billable dimensions and entitlement policy |
 | Service owner | launchd `com.dani-free` | launchd `com.dani-free.kilo-only` | no shared process |
 | Rollback | current listener | change OMP URL back to `:4190` | formal rollback test |
@@ -52,7 +52,7 @@ The router is a **model request router**. It is not the owner of OMP's subagent 
 | Component | Address / path | Owner | Responsibility |
 | --- | --- | --- | --- |
 | OMP harness | `~/.omp/agent/` | OMP | conversation state, tool calls, subagents, role-to-model assignment |
-| Dani-Free | `127.0.0.1:4190` | launchd `com.dani-free` | OpenAI-compatible router; standard listener is Kilo-only; `auto` aliases `kilo/nex-agi/nex-n2.5-pro:free`; no second-model retry |
+| Dani-Free | `127.0.0.1:4190` | launchd `com.dani-free` | OpenAI-compatible router; standard listener is OpenCode-first, then Kilo; `auto` aliases `opencode/nemotron-3-ultra-free` and fails over across the six-model chain |
 | Dani-Free Kilo-only canary | `127.0.0.1:4290` | launchd `com.dani-free.kilo-only` | historical isolated Kilo-only inference listener |
 | Legacy OpenCode proxy | `127.0.0.1:4187` | external launchd service | separate OpenAI-compatible compatibility service; not an ACP bridge or Dani-Free automatic route |
 | Legacy OpenCode child server | `127.0.0.1:4188` | supervised by the external proxy | separate OpenCode session process; not owned by Dani-Free |
@@ -66,7 +66,7 @@ The router is a **model request router**. It is not the owner of OMP's subagent 
 ```text
 4187  external legacy OpenCode proxy only
 4188  external legacy OpenCode child only; not addressed by Dani-Free automatically
-4190  Dani-Free standard Kilo-only listener (`auto` → kilo/nex-agi/nex-n2.5-pro:free)
+4190  Dani-Free standard OpenCode-first listener (`auto` → opencode/nemotron-3-ultra-free, six-model failover chain)
 4290  historical isolated Dani-Free Kilo-only canary
 ```
 Any second listener on those ports is a configuration error. The external proxy must not be started by both launchd and another supervisor.
@@ -123,13 +123,18 @@ GET  /v1/models
 POST /v1/chat/completions
 ```
 
-`/v1/models` returns backend-prefixed selectors for the adapters that are configured and discoverable. The standard listener allowlists the pinned primary, so the advertised set is:
+`/v1/models` returns backend-prefixed selectors for the adapters that are configured and discoverable. The standard listener allowlists three OpenCode free ids and three Kilo free ids, so the advertised set is:
 
 ```text
+opencode/nemotron-3-ultra-free
+opencode/muse-spark-1.3-contributor-free
+opencode/mimo-v2.5-free
 kilo/nex-agi/nex-n2.5-pro:free
+kilo/dots-studio/dots-3-note-preview:free
+kilo/nex-agi/nex-n2.5-mini:free
 ```
 
-`mimo/<model-id>` and `opencode/<model-id>` appear only when those adapters are deliberately supplied. They are not part of standard `dani-free start` and are never `auto`.
+`mimo/<model-id>` appears only when that adapter is deliberately supplied. It is not part of standard `dani-free start` and is never `auto`.
 
 ### Request modes
 
@@ -139,7 +144,7 @@ kilo/nex-agi/nex-n2.5-pro:free
 model: kilo/<model-id>
 ```
 
-The router discovers the specified backend model and sends the request only there. It does not move to another model or another provider on failure. Explicit selectors fail closed. An `opencode/<id>` or `mimo/<id>` request is available only when that adapter is deliberately supplied.
+The router resolves the explicit selector first. If that attempt fails with a retryable condition (transport error, timeout, 408, 429, 5xx, HTTP 200 with empty content, or HTTP 200 with a body exceeding the 8 MiB buffer cap), the router continues with the rest of the standard OpenCode-first chain. A missing or unhealthy explicit model fails closed without touching the chain. An `opencode/<id>` or `mimo/<id>` request is available only when that adapter is deliberately supplied.
 
 #### Automatic request
 
@@ -147,9 +152,9 @@ The router discovers the specified backend model and sends the request only ther
 model: auto
 ```
 
-`auto` aliases `kilo/nex-agi/nex-n2.5-pro:free` and uses the same fail-closed explicit path. Missing, unhealthy, 429, 503, and timeout responses return that error. The router does not retry another Kilo model or MiMo.
+`auto` aliases `opencode/nemotron-3-ultra-free` and walks the OpenCode-first six-model failover chain. A missing or unhealthy model is skipped; a transport error, timeout, 408, 429 (pauses briefly with backoff, then advances), 5xx, an HTTP 200 with empty content, or an HTTP 200 whose body exceeds the 8 MiB buffer cap fails over to the next model. Any other 4xx refusal is returned to the caller as-is. If every model in the chain fails, the caller gets a 503 `all_models_failed` with per-attempt reasons.
 
-A former work-log policy treated network errors, HTTP 429, HTTP 5xx, and attempt timeout as retryable across a Kilo-then-MiMo candidate list. That is not current `:4190` behavior.
+A former work-log policy treated network errors, HTTP 429, HTTP 5xx, and attempt timeout as retryable across a Kilo-then-MiMo candidate list, and a later Kilo-only canary pinned `auto` to one Kilo model with no second-model retry. Neither is current `:4190` behavior.
 
 ### Discovery cache
 
@@ -157,7 +162,7 @@ Dani-Free keeps a per-backend model cache for five seconds.
 
 ```text
 first request or expired cache
-list configured adapters (standard start: Kilo only)
+list configured adapters (standard start: OpenCode and Kilo)
 cache successful model lists for 5 seconds
 
 subsequent request during TTL
@@ -172,11 +177,11 @@ The effective timing policy is:
 
 | Scope | Limit | Purpose |
 | --- | ---: | --- |
-| configured router request timeout | normally 45 seconds from runtime config | single-attempt bound when the server was started through its configuration loader |
+| configured router request timeout | normally 180 seconds from runtime config (`DANI_FREE_REQUEST_TIMEOUT_MS`; default `180_000` in `src/config.ts`) | single-attempt bound when the server was started through its configuration loader |
 | Router class fallback default | 120 seconds | used only if the server was not started through the configuration loader |
 | incoming request signal | propagated through the attempt | client cancellation is terminal and stops the attempt |
 
-There is no 30-second per-candidate retry window and no 90-second `auto` fallback budget. `auto` is one pinned Kilo model; a 429, 503, or timeout returns that error. Attempt deadlines remain active through streamed response EOF.
+There is no 30-second per-candidate retry window and no 90-second `auto` fallback budget. `auto` is the OpenCode-first six-model failover chain starting at `opencode/nemotron-3-ultra-free`; a transport error, timeout, 408, 429 (with backoff), or 5xx fails over to the next model, and if all fail the caller gets a 503 `all_models_failed`. Attempt deadlines remain active through streamed response EOF.
 
 ### Important limit
 
@@ -188,7 +193,7 @@ A single-attempt timeout cannot make a model complete a difficult 70k-token prom
 
 Source: `~/.hermes/opencode-proxy/server.ts`.
 
-This section documents a separate external compatibility service. It is not the official OpenCode ACP integration, is not owned by Dani-Free, and is not part of current `auto` (the pinned Kilo model). It may be used only by an explicit legacy adapter configuration.
+This section documents a separate external compatibility service. It is not the official OpenCode ACP integration, is not owned by Dani-Free, and is not part of current `auto` (the OpenCode-first failover chain starting at `opencode/nemotron-3-ultra-free`). It may be used only by an explicit legacy adapter configuration.
 
 OpenCode's free upstream rejects plain external OpenAI calls. The external proxy runs `opencode serve`, creates an OpenCode session, sends a prompt through that session, captures the completed message, and converts it back to an OpenAI chat-completion response.
 
@@ -321,7 +326,7 @@ The currently persisted measurements should not be read as a definitive global m
 
 The Kilo adapter speaks to the Kilo gateway, lists the models marked free, and forwards the provider's native model ID unchanged. It is a distinct remote provider, not a local Kilo proxy. Its behavior and configuration remain unchanged by the OpenCode boundary.
 
-Current `auto` is the pinned Kilo model `kilo/nex-agi/nex-n2.5-pro:free` only. A former work-log order tried Kilo then MiMo; that is not current `:4190` behavior.
+Current `auto` walks the OpenCode-first six-model failover chain starting at `opencode/nemotron-3-ultra-free`. A former work-log order tried Kilo then MiMo, and a later canary pinned `auto` to the Kilo model only; neither is current `:4190` behavior.
 
 ### MiMo
 
@@ -337,12 +342,12 @@ MiMo is not on the standard listener and is never an `auto` fallback. A model me
 OMP or API client
 Dani-Free :4190
   five-second per-backend discovery cache
-  auto: kilo/nex-agi/nex-n2.5-pro:free (no second-model retry)
-  explicit backend/model: selected backend only
-  optional explicit MiMo / legacy OpenCode adapters: never automatic, not standard start
+  auto: OpenCode-first six-model failover chain (auto → opencode/nemotron-3-ultra-free)
+  explicit backend/model: explicit attempt first, then the rest of the chain on retryable failure
+  optional explicit MiMo adapter: never automatic, not standard start
+OpenCode adapter: opencode serve session bridge
 Kilo adapter: Kilo gateway
 MiMo adapter: configured MiMo service (not standard start)
-External legacy OpenCode adapter: separate :4187 proxy and child service
 ```
 
 ---
@@ -354,9 +359,12 @@ External legacy OpenCode adapter: separate :4187 proxy and child service
 | `401` | Dani-Free | local API key mismatch | reject request |
 | `413` | Dani-Free | request body too large | reject request |
 | `404 model_not_found` | adapter/router | explicit model absent | do not fall back |
-| `429` | provider | provider rate limit | preserve status; `auto` does not try another model |
-| `5xx` | provider | transient upstream failure | preserve status; `auto` does not try another model |
-| `504 timeout` | router | discovery or attempt deadline reached | return the timeout; `auto` does not try another model |
+| `429` | provider | provider rate limit | fail over to the next model after a ~1s backoff |
+| `5xx` | provider | transient upstream failure | fail over to the next model |
+| HTTP 200 with empty content | provider | empty-content quirk | fail over to the next model |
+| HTTP 200 with oversized body | provider | body exceeds the 8 MiB buffer cap | fail over to the next model |
+| `504 timeout` | router | discovery or attempt deadline reached | fail over on an attempt timeout; return 504 on discovery/client cancellation |
+| all models failed | router | every model in the chain failed | 503 `all_models_failed` with per-attempt reasons |
 | cancellation | router | incoming request signal fired | propagate cancellation and stop; do not retry or fall back |
 | capability mismatch | router | candidate cannot satisfy request | exclude candidate; do not silently switch an explicit selector |
 | `/health` degraded | one or more backends | discovery/health failure | inspect per-backend reason |
@@ -450,7 +458,7 @@ The stack is a useful local compatibility layer, but it is not a transparent rep
 The currently correct narrow claim is:
 
 ```text
-Dani-Free's standard `:4190` listener is Kilo-only; `auto` aliases `kilo/nex-agi/nex-n2.5-pro:free` with fail-closed selectors and no second-model retry.
+Dani-Free's standard `:4190` listener is OpenCode-first, then Kilo; `auto` aliases `opencode/nemotron-3-ultra-free` and fails over across a six-model chain (transport errors, timeouts, 408, 429 with backoff, 5xx, empty or oversized 200s), passing other 4xx refusals through as-is.
 ```
 
 The claim it cannot currently support is:
