@@ -438,23 +438,28 @@ function chatCompletionHasContent(payload: unknown): boolean | undefined {
 }
 
 /**
- * Extract the message from an upstream HTTP 200 body that is an OpenAI-style
- * error envelope (`{ "error": { "message": ... } }`) instead of a completion.
- * Some gateways signal a refusal with a 200; without this check the envelope
- * would reach the client as a "successful" 200 and the attempt would count as
- * answered, so no failover would happen. Returns undefined for a genuine
- * completion: a real chat completion never carries a top-level error envelope,
- * so a contentful answer always wins over a stray "error" key.
+ * Extract the message from an upstream HTTP 200 body that is an error envelope
+ * instead of a completion. Some gateways signal a refusal with a 200 using an
+ * OpenAI-style envelope (`{ "error": { "message": ... } }`), and others send
+ * the refusal as a bare string (`{ "error": "quota exceeded" }`); without this
+ * check the envelope would reach the client as a "successful" 200 and the
+ * attempt would count as answered, so no failover would happen. Returns
+ * undefined for a genuine completion: a real chat completion never carries a
+ * top-level error envelope, so a contentful answer always wins over a stray
+ * "error" key.
  */
 function errorEnvelopeMessage(payload: unknown): string | undefined {
   if (!isRecord(payload)) return undefined;
   const error = payload.error;
-  if (!isRecord(error)) return undefined;
   const message =
-    typeof error.message === "string"
-      ? error.message.trim()
-      : typeof error.detail === "string"
-        ? error.detail.trim()
+    typeof error === "string"
+      ? error.trim()
+      : isRecord(error)
+        ? typeof error.message === "string"
+          ? error.message.trim()
+          : typeof error.detail === "string"
+            ? error.detail.trim()
+            : ""
         : "";
   if (!message) return undefined;
   if (chatCompletionHasContent(payload) === true) return undefined;
