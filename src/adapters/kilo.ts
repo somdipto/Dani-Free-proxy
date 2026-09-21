@@ -192,7 +192,7 @@ export class KiloAdapter implements BackendAdapter {
     }
     console.error(`[kilo] ${init.method ?? "GET"} ${path} -> ${response.status} in ${Date.now() - startedAt}ms`);
     if (!response.ok) {
-      const body = await response.text().catch(() => "");
+      const body = await readErrorSnippet(response);
       throw new KiloBackendError(url, response.status, response.statusText, body);
     }
     return response;
@@ -242,6 +242,37 @@ function modelCapabilities(row: Record<string, unknown>): Capability[] {
   const values = new Set([...declared, ...modalities].map((value) => value.toLowerCase()));
   if (values.has("image") || values.has("vision") || values.has("multimodal")) capabilities.push("image");
   return capabilities;
+}
+
+/** Max upstream error-body bytes read when building a KiloBackendError. Parity with the router's own error-snippet cap: a bloated upstream error page must not be buffered whole. */
+const MAX_KILO_ERROR_BODY_BYTES = 2_048;
+
+/**
+ * Read at most `MAX_KILO_ERROR_BODY_BYTES` of an upstream error body, then
+ * stop the stream. Mirrors the router's readUpstreamSnippet: mid-read body
+ * failures diagnose as nothing, like the old full-read path.
+ */
+async function readErrorSnippet(response: Response): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (bytes < MAX_KILO_ERROR_BODY_BYTES) {
+      const part = await reader.read();
+      if (part.done) break;
+      chunks.push(part.value);
+      bytes += part.value.byteLength;
+    }
+    // Enforce the byte cap exactly: one upstream chunk can be larger than the
+    // cap on its own, so slice after concat rather than trusting chunk size.
+    return new TextDecoder().decode(Buffer.concat(chunks).subarray(0, MAX_KILO_ERROR_BODY_BYTES));
+  } catch {
+    return "";
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
 }
 
 function extractErrorDetail(body: string): string {
