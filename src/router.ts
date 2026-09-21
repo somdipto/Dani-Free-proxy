@@ -261,12 +261,21 @@ function withModelHeader(response: Response, selector: string): Response {
   });
 }
 
+/**
+ * Strip URLs and bearer tokens from any diagnostic text that ends up in a
+ * failover reason handed back to the client. Upstream error bodies can carry
+ * signed URLs or leaked credentials; error messages already get this pass,
+ * and typed JSON error details should too.
+ */
+function redactDiagnostics(text: string): string {
+  return text
+    .replace(/https?:\/\/[^\s)"']+/g, "[url]")
+    .replace(/bearer\s+[^\s]+/gi, "Bearer [redacted]");
+}
+
 function sanitizeReason(error: unknown, fallback: string): string {
   const raw = error instanceof Error ? error.message : String(error);
-  const cleaned = raw
-    .replace(/https?:\/\/[^\s)"']+/g, "[url]")
-    .replace(/bearer\s+[^\s]+/gi, "Bearer [redacted]")
-    .trim();
+  const cleaned = redactDiagnostics(raw).trim();
   const text = cleaned || fallback;
   return text.length > 200 ? `${text.slice(0, 197)}...` : text;
 }
@@ -336,7 +345,7 @@ function statusTextOf(error: unknown): string | undefined {
 
 function retryableStatusReason(error: unknown, status: number, fallback: string): string {
   const detail = errorBodyDetail(error) || sanitizeReason(error, fallback);
-  return upstreamReason(status, statusTextOf(error), detail);
+  return upstreamReason(status, statusTextOf(error), redactDiagnostics(detail));
 }
 
 /**

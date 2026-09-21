@@ -257,6 +257,25 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual([primaryId, "other"]);
   });
 
+  it("redacts URLs and bearer tokens from typed upstream error details in failover reasons", async () => {
+    const detail = `{"error": {"message": "see https://upstream.example/quota?key=abc, Bearer sk-secret-123"}}`;
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", primaryId)], async () => {
+        throw new KiloBackendError("http://upstream", 503, "Upstream meltdown", detail);
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.error.code).toBe("all_models_failed");
+    const reason: string = body.attempts[0].reason;
+    expect(reason).toContain("[url]");
+    expect(reason).toContain("Bearer [redacted]");
+    expect(reason).not.toContain("upstream.example");
+    expect(reason).not.toContain("sk-secret-123");
+  });
+
   it("returns 503 with per-model reasons when every model fails differently", async () => {
     const calls: string[] = [];
     const router = createRouter({
