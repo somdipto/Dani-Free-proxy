@@ -36,6 +36,13 @@ The router keeps a five-second model-discovery cache. The request deadline start
 | `DANI_FREE_KILO_API_KEY` | Kilo Code endpoint credential, if required. |
 | `DANI_FREE_OPENCODE_BASE_URL` | `opencode serve` sidecar base URL. Defaults to `http://127.0.0.1:4187`. |
 | `DANI_FREE_OPENCODE_API_KEY` | Sidecar password, only when the sidecar runs with `OPENCODE_SERVER_PASSWORD`. Sent as HTTP Basic `opencode:<key>`; never as a Bearer token and never to any remote API. |
+| `DANI_FREE_MIMO_BASE_URL` | Verified MiMo Code endpoint (OpenAI-compatible). Optional; an invalid or non-HTTP(S) value leaves the adapter unavailable, and an unset value means the MiMo adapter only runs in command mode. Also accepted from the JSON file's `mimo` object. |
+| `DANI_FREE_MIMO_API_KEY` | MiMo endpoint credential, if required. Also accepted from the JSON file's `mimo` object. |
+| `DANI_FREE_MIMO_COMMAND` | Absolute path to the `mimo` executable. Starts a local `mimo serve` HTTP server on `DANI_FREE_MIMO_SERVE_PORT` and speaks the opencode protocol to it; the CLI's own command protocol and flags are not verified, so command mode only uses the `mimo serve` HTTP API. Also accepted from the JSON file's `mimo` object. |
+| `DANI_FREE_MIMO_PROTOCOL` | `openai` (default) or `opencode`. Env-only: the MiMo adapter reads it from the process environment, not from the JSON file. Any other value makes the transport unavailable. |
+| `DANI_FREE_MIMO_SERVE_PORT` | Command-mode server port; defaults to `4191` and must be an integer from 1 to 65535. Env-only. |
+| `DANI_FREE_MIMO_PROVIDERS` | Comma-separated provider ids the opencode-protocol path may use; defaults to `mimo`. Env-only. |
+| `DANI_FREE_MIMO_AGENT` / `DANI_FREE_MIMO_ORCHESTRATOR` | Agent name for opencode-protocol prompts; `DANI_FREE_MIMO_AGENT` wins, then `DANI_FREE_MIMO_ORCHESTRATOR`, then `build`. Env-only. |
 | `DANI_FREE_BODY_LIMIT_BYTES` | Incoming request-body size cap; defaults to 4 MiB. Bodies larger than the cap are rejected with a 413 `request_too_large` (the router library default is 1 MiB when no config is used). |
 | `DANI_FREE_REQUEST_TIMEOUT_MS` | Single request deadline in milliseconds, shared across incoming body, discovery, completion, and streamed response EOF; defaults to 180_000 for the standard listener and 120_000 for the Kilo-only listener. Must be an integer between 100 and 300_000. |
 | `DANI_FREE_CONFIG` | Optional JSON config file path. Defaults to `~/.config/dani-free/config.json` when it exists; a missing file is only an error when this variable names it explicitly. |
