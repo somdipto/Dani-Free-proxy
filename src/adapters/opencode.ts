@@ -107,6 +107,14 @@ function truncate(text: string, maxLength: number): string {
   return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
 }
 
+/**
+ * Max upstream error-body bytes read for OpenCode failure diagnostics.
+ * Parity with the Kilo adapter's cap: a bloated upstream error page
+ * (multi-MB gateway HTML on a 502) must not be buffered whole just to
+ * build an error detail.
+ */
+const MAX_OPENCODE_ERROR_BODY_BYTES = 2_048;
+
 /** Free ids: provider ids ending in `-free`, plus opencode's own free model. */
 function isFreeModelId(id: string): boolean {
   return id === "big-pickle" || id.endsWith("-free");
@@ -504,12 +512,33 @@ export class OpenCodeAdapter implements BackendAdapter {
     }
   }
 
+  /**
+   * Read at most MAX_OPENCODE_ERROR_BODY_BYTES of an upstream error body for
+   * diagnostics, then stop the stream. Mirrors the Kilo adapter's
+   * readErrorSnippet: a mid-read body failure diagnoses with nothing, like
+   * the old full-read path which swallowed body errors the same way.
+   */
   private async readErrorBody(response: Response): Promise<string> {
+    if (!response.body) return "";
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let bytes = 0;
     try {
-      const text = await response.text();
+      while (bytes < MAX_OPENCODE_ERROR_BODY_BYTES) {
+        const part = await reader.read();
+        if (part.done) break;
+        chunks.push(part.value);
+        bytes += part.value.byteLength;
+      }
+      // Enforce the byte cap exactly: one upstream chunk can be larger than
+      // the cap on its own, so slice after concat rather than trusting chunk size.
+      const text = new TextDecoder().decode(Buffer.concat(chunks).subarray(0, MAX_OPENCODE_ERROR_BODY_BYTES));
       return truncate(text.trim(), 300);
     } catch {
       return "";
+    } finally {
+      await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
     }
   }
 

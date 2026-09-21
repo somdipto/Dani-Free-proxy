@@ -375,4 +375,44 @@ describe("OpenCodeAdapter", () => {
     expect((error as OpenCodeError).status).toBe(400);
     expect((error as OpenCodeError).message).toContain("HTTP 400");
   });
+
+  it("caps a bloated upstream error page at 2 KiB instead of buffering it whole", async () => {
+    const stub = (async () =>
+      new Response(`<html>${"x".repeat(100_000)}</html>`, {
+        status: 502,
+        statusText: "Bad Gateway",
+      })) as unknown as typeof fetch;
+    const adapter = new OpenCodeAdapter({ baseUrl: BASE, apiKey: "", fetch: stub });
+    const error = await adapter
+      .complete(
+        { model: "opencode/nemotron-3-ultra-free", messages: [{ role: "user", content: "hi" }] },
+        testModel(),
+        new AbortController().signal,
+      )
+      .then(() => undefined, (failure: unknown) => failure);
+    expect(error).toBeInstanceOf(OpenCodeError);
+    expect((error as OpenCodeError).status).toBe(502);
+    // The 100 KiB page is read only up to the 2 KiB cap, then the diagnostic
+    // detail is truncated to 300 chars in the error message.
+    expect((error as OpenCodeError).message.length).toBeLessThan(600);
+  });
+
+  it("keeps a small upstream error body intact in the diagnostic detail", async () => {
+    const stub = (async () =>
+      new Response(JSON.stringify({ error: "quota exhausted" }), {
+        status: 429,
+        statusText: "Too Many Requests",
+      })) as unknown as typeof fetch;
+    const adapter = new OpenCodeAdapter({ baseUrl: BASE, apiKey: "", fetch: stub });
+    const error = await adapter
+      .complete(
+        { model: "opencode/nemotron-3-ultra-free", messages: [{ role: "user", content: "hi" }] },
+        testModel(),
+        new AbortController().signal,
+      )
+      .then(() => undefined, (failure: unknown) => failure);
+    expect(error).toBeInstanceOf(OpenCodeError);
+    expect((error as OpenCodeError).status).toBe(429);
+    expect((error as OpenCodeError).message).toContain("quota exhausted");
+  });
 });
