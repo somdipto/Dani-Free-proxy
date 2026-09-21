@@ -190,6 +190,7 @@ async function runStart(config: DaniFreeConfig): Promise<number> {
     port: config.port,
     apiKey: config.apiKey,
     timeoutMs: config.requestTimeoutMs,
+    attemptTimeoutMs: config.attemptTimeoutMs,
     maxBodyBytes: config.bodyLimitBytes,
   });
   console.log(`dani-free listening at ${endpoint(config)}`);

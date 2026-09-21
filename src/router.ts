@@ -22,9 +22,17 @@ export interface RouterOptions {
   modelChain?: string[];
   /** Base backoff before the next chain attempt after a 429. Defaults to 1000ms. */
   failoverBackoffMs?: number;
+  /**
+   * Per-attempt deadline for a single model in the failover chain. When one
+   * backend hangs, the attempt is abandoned after this long and the chain
+   * walks to the next model instead of burning the whole request deadline on
+   * the hung backend. Defaults to 60s; clamped to the overall timeout.
+   */
+  attemptTimeoutMs?: number;
 }
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
+export const DEFAULT_ATTEMPT_TIMEOUT_MS = 60_000;
 export const DEFAULT_MAX_BODY_BYTES = 1_048_576;
 const MODEL_CACHE_TTL_MS = 5_000;
 export const DEFAULT_PRIMARY_MODEL = "kilo/nex-agi/nex-n2.5-pro:free";
@@ -679,6 +687,7 @@ function responseWithDeadline(response: Response, scope: CombinedSignal): Respon
 export class Router {
   readonly adapters: BackendAdapter[];
   readonly timeoutMs: number;
+  readonly attemptTimeoutMs: number;
   readonly maxBodyBytes: number;
   readonly apiKey?: string;
   readonly primaryModel: string;
@@ -694,6 +703,7 @@ export class Router {
   constructor(options: RouterOptions = {}) {
     this.adapters = options.adapters ?? [];
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.attemptTimeoutMs = Math.min(options.attemptTimeoutMs ?? DEFAULT_ATTEMPT_TIMEOUT_MS, this.timeoutMs);
     this.maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
     this.apiKey = options.apiKey ?? process.env.DANI_FREE_API_KEY;
     this.primaryModel = options.primaryModel ?? DEFAULT_PRIMARY_MODEL;
@@ -885,8 +895,10 @@ export class Router {
    * Retryable: network errors, upstream timeouts (including HTTP 408), 429, 5xx,
    * and HTTP 200 with an error envelope, invalid JSON, empty/no text content,
    * or a body exceeding the MAX_UPSTREAM_RESPONSE_BYTES buffer cap. Never fails over after response bytes
-   * have been emitted to the client. All attempts share the caller's remaining
-   * deadline via `signal`.
+   * have been emitted to the client. Each attempt gets its own deadline
+   * (attemptTimeoutMs): a hung backend is abandoned and the chain walks on
+   * instead of burning the whole request deadline on the first attempt. All
+   * attempts still share the caller's overall deadline via `signal`.
    */
   private async completeWithFailover(request: ChatRequest, attempts: Route[], signal: AbortSignal): Promise<Response> {
     const failures: AttemptFailure[] = [];
@@ -911,16 +923,26 @@ export class Router {
       if (limitError) return limitError;
 
       let response: Response;
+      // A hung backend must not consume the whole request deadline: each
+      // attempt runs under its own shorter deadline so the chain can walk on.
+      const attemptScope = deadline(signal, this.attemptTimeoutMs);
       try {
-        const completion = route.backend.complete({ ...request, model: route.model.id }, route.model, signal);
+        const completion = route.backend.complete({ ...request, model: route.model.id }, route.model, attemptScope.signal);
         // An adapter may ignore cancellation and return a body after the caller has left.
         void completion.then((candidate) => {
-          if (signal.aborted) void candidate.body?.cancel().catch(() => undefined);
+          if (attemptScope.signal.aborted) void candidate.body?.cancel().catch(() => undefined);
         }, () => undefined);
-        response = await raceWithSignal(completion, signal);
+        response = await raceWithSignal(completion, attemptScope.signal);
       } catch (error) {
         // Client cancellation and the overall deadline are never retried.
-        if (isAbort(error)) throw error;
+        if (signal.aborted) throw error;
+        if (isAbort(error)) {
+          // Only this attempt's deadline fired: the backend hung. Record it
+          // and walk to the next model instead of failing the request.
+          failures.push({ model: selector, reason: "attempt timed out" });
+          if (hasNext) await this.failoverBackoff(signal);
+          continue;
+        }
         const status = statusFrom(error);
         if (status === 429) {
           failures.push({ model: selector, status, reason: retryableStatusReason(error, status, "rate limited") });
@@ -939,6 +961,8 @@ export class Router {
         }
         failures.push({ model: selector, reason: sanitizeReason(error, "network error") });
         continue;
+      } finally {
+        attemptScope.dispose();
       }
 
       const status = response.status;

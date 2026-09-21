@@ -16,6 +16,7 @@ export interface DaniFreeConfig {
   port: number;
   apiKey?: string;
   requestTimeoutMs: number;
+  attemptTimeoutMs: number;
   bodyLimitBytes: number;
   configPath: string;
   backends: Record<BackendId, BackendSettings>;
@@ -26,6 +27,7 @@ interface ConfigFile {
   port?: unknown;
   apiKey?: unknown;
   requestTimeoutMs?: unknown;
+  attemptTimeoutMs?: unknown;
   bodyLimitBytes?: unknown;
   backends?: unknown;
   opencode?: unknown;
@@ -38,6 +40,7 @@ const DEFAULTS: DaniFreeConfig = {
   host: "127.0.0.1",
   port: 4190,
   requestTimeoutMs: 180_000,
+  attemptTimeoutMs: 60_000,
   bodyLimitBytes: 4 * 1024 * 1024,
   configPath: DEFAULT_CONFIG_PATH,
   backends: {
@@ -116,6 +119,7 @@ export function loadConfig(configPath?: string): DaniFreeConfig {
   const host = env("DANI_FREE_HOST") ?? stringValue(file.host, "host") ?? DEFAULTS.host;
   const port = numberValue(env("DANI_FREE_PORT") ?? file.port, "port", 1, 65_535) ?? DEFAULTS.port;
   const requestTimeoutMs = numberValue(env("DANI_FREE_REQUEST_TIMEOUT_MS") ?? file.requestTimeoutMs, "requestTimeoutMs", 100, 300_000) ?? DEFAULTS.requestTimeoutMs;
+  const attemptTimeoutMs = numberValue(env("DANI_FREE_ATTEMPT_TIMEOUT_MS") ?? file.attemptTimeoutMs, "attemptTimeoutMs", 5_000, 300_000) ?? DEFAULTS.attemptTimeoutMs;
   const bodyLimitBytes = numberValue(env("DANI_FREE_BODY_LIMIT_BYTES") ?? file.bodyLimitBytes, "bodyLimitBytes", 1_024, 100 * 1024 * 1024) ?? DEFAULTS.bodyLimitBytes;
   const apiKey = env("DANI_FREE_API_KEY") ?? stringValue(file.apiKey, "apiKey");
 
@@ -146,7 +150,7 @@ export function loadConfig(configPath?: string): DaniFreeConfig {
     }
   }
 
-  return { host, port, apiKey, requestTimeoutMs, bodyLimitBytes, configPath: selectedPath, backends };
+  return { host, port, apiKey, requestTimeoutMs, attemptTimeoutMs, bodyLimitBytes, configPath: selectedPath, backends };
 }
 
 export function configDirectory(configPath = DEFAULT_CONFIG_PATH): string {

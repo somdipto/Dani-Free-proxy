@@ -113,6 +113,33 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual(["b"]);
   });
 
+  it("fails over when a backend hangs past the per-attempt deadline", async () => {
+    const time = clock();
+    try {
+      const calls: string[] = [];
+      const hang = Promise.withResolvers<Response>();
+      const router = createRouter({
+        timeoutMs: 10_000,
+        attemptTimeoutMs: 100,
+        failoverBackoffMs: 1,
+        adapters: [
+          adapter("opencode", [model("opencode", "a")], async () => { calls.push("opencode"); return hang.promise; }),
+          adapter("kilo", [model("kilo", "b")], async () => { calls.push("kilo"); return Response.json({ ok: "kilo" }); }),
+        ],
+      });
+      const pending = router.handle(chat("auto"));
+      await time.flush();
+      // Fires the 100ms attempt timer and the 1ms failover backoff after it.
+      await time.advance(1000);
+      const response = await pending;
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: "kilo" });
+      expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+      expect(calls).toEqual(["opencode", "kilo"]);
+      hang.resolve(Response.json({}));
+    } finally { time.restore(); }
+  });
+
   it("discovers every chain backend concurrently instead of one round trip at a time", async () => {
     type Gate = {
       promise: Promise<BackendModel[]>;
