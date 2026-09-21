@@ -47,7 +47,7 @@ Expected result: a `200` response containing `AUTO_ACK`. If it fails, use the ex
 3. Check `/v1/models` and copy an exact returned model id.
 4. Confirm requested capabilities match the candidate before sending the request.
 5. Send a minimal non-streaming request with `temperature: 0` and a short `max_tokens` value.
-6. If the request fails, isolate the explicit selector (`kilo/<id>` or `mimo/<id>`; `opencode/<id>` only for a deliberately supplied legacy adapter) before trying `auto`.
+6. If the request fails, isolate the explicit selector (`opencode/<id>` or `kilo/<id>`; `mimo/<id>` only when a MiMo backend is configured) before trying `auto`.
 7. Redact `Authorization`, API keys, cookies, prompts containing secrets, and full upstream response bodies in reports.
 
 Do not mark an unavailable backend healthy by adding static model entries or by replacing its endpoint with an unverified provider. Do not treat installation of the Dani-Free skill in an OpenCode skill directory as an OpenCode ACP bridge or automatic enrollment.

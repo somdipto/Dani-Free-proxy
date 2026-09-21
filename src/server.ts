@@ -17,7 +17,7 @@ export interface RouterServer {
   readonly port: number;
 }
 
-/** OpenCode free ids occupy slots 1-3. `auto` is OpenCode nemotron-3-ultra-free. */
+/** OpenCode free ids occupy slots 1-3. `auto` starts at nemotron-3-ultra-free and walks the failover chain. */
 export const OPENCODE_FREE_MODELS = [
   "opencode/nemotron-3-ultra-free",
   "opencode/muse-spark-1.3-contributor-free",
