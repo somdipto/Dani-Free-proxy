@@ -126,7 +126,7 @@ export class KiloAdapter implements BackendAdapter {
       headers: { Accept: "application/json" },
       signal,
     });
-    const payload: unknown = await response.json();
+    const payload: unknown = await readCappedJson(response);
     const models = parseModels(payload);
     const freeModels = models.filter((model) => CANONICAL_FREE_MODEL_SET.has(model.id));
     return prioritizeFreeModels(freeModels);
@@ -250,6 +250,44 @@ function modelCapabilities(row: Record<string, unknown>): Capability[] {
 
 /** Max upstream error-body bytes read when building a KiloBackendError. Parity with the router's own error-snippet cap: a bloated upstream error page must not be buffered whole. */
 const MAX_KILO_ERROR_BODY_BYTES = 2_048;
+
+/**
+ * Max /models discovery-body bytes parsed for a 200 response. A 200 with an
+ * anomalously large body (multi-MB gateway HTML) must fail discovery instead
+ * of being buffered whole: discovery refetches on every cache miss, so an
+ * unbounded parse is a memory-exhaustion shape.
+ */
+export const MAX_KILO_DISCOVERY_BYTES = 1_048_576;
+
+/**
+ * Parse a JSON response body, refusing to buffer more than `maxBytes` first.
+ * A single oversized chunk trips the cap without being buffered whole; the
+ * remainder of the stream is cancelled. Throws on an empty body, an oversize
+ * body, or invalid JSON.
+ */
+async function readCappedJson(response: Response, maxBytes = MAX_KILO_DISCOVERY_BYTES): Promise<unknown> {
+  if (!response.body) throw new Error("Kilo gateway returned an empty /models response");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      // Check the cap before retaining the chunk: a single oversized chunk
+      // must trip the cap without being buffered into memory whole first.
+      if (bytes + part.value.byteLength > maxBytes) {
+        throw new Error(`Kilo gateway returned a /models response exceeding ${maxBytes} bytes`);
+      }
+      chunks.push(part.value);
+      bytes += part.value.byteLength;
+    }
+    return JSON.parse(new TextDecoder().decode(Buffer.concat(chunks, bytes)));
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
 
 /**
  * Read at most `MAX_KILO_ERROR_BODY_BYTES` of an upstream error body, then
