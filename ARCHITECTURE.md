@@ -144,7 +144,7 @@ kilo/nex-agi/nex-n2.5-mini:free
 model: kilo/<model-id>
 ```
 
-The router resolves the explicit selector first. If that attempt fails with a retryable condition (transport error, 408, 429, 5xx, HTTP 200 with empty content, or HTTP 200 with a body exceeding the 8 MiB buffer cap), the router continues with the rest of the standard OpenCode-first chain. A missing or unhealthy explicit model fails closed without touching the chain. An `opencode/<id>` or `mimo/<id>` request is available only when that adapter is deliberately supplied.
+The router resolves the explicit selector first. If that attempt fails with a retryable condition (transport error, 408, 429, 5xx, an HTTP 200 with empty content, an HTTP 200 with an invalid JSON body, an HTTP 200 carrying an error envelope, or an HTTP 200 with a body exceeding the 8 MiB buffer cap), the router continues with the rest of the standard OpenCode-first chain. A missing or unhealthy explicit model fails closed without touching the chain. An `opencode/<id>` or `mimo/<id>` request is available only when that adapter is deliberately supplied.
 
 #### Automatic request
 
@@ -152,7 +152,7 @@ The router resolves the explicit selector first. If that attempt fails with a re
 model: auto
 ```
 
-`auto` aliases `opencode/nemotron-3-ultra-free` and walks the OpenCode-first six-model failover chain. A missing or unhealthy model is skipped; a transport error, 408, 429 (pauses briefly with backoff, then advances), 5xx, an HTTP 200 with empty content, or an HTTP 200 whose body exceeds the 8 MiB buffer cap fails over to the next model. Any other 4xx refusal is returned to the caller as-is. If every model in the chain fails, the caller gets a 503 `all_models_failed` with per-attempt reasons.
+`auto` aliases `opencode/nemotron-3-ultra-free` and walks the OpenCode-first six-model failover chain. A missing or unhealthy model is skipped; a transport error, 408, 429 (pauses briefly with backoff, then advances), 5xx, an HTTP 200 with empty content, an HTTP 200 with an invalid JSON body, an HTTP 200 carrying an error envelope, or an HTTP 200 whose body exceeds the 8 MiB buffer cap fails over to the next model. Any other 4xx refusal is returned to the caller as-is. If every model in the chain fails, the caller gets a 503 `all_models_failed` with per-attempt reasons.
 
 A former work-log policy treated network errors, HTTP 429, HTTP 5xx, and attempt timeout as retryable across a Kilo-then-MiMo candidate list, and a later Kilo-only canary pinned `auto` to one Kilo model with no second-model retry. Neither is current `:4190` behavior.
 
