@@ -332,7 +332,9 @@ async function readUpstreamSnippet(response: Response, signal: AbortSignal, maxB
       chunks.push(part.value);
       bytes += part.value.byteLength;
     }
-    return new TextDecoder().decode(Buffer.concat(chunks, bytes));
+    // Enforce the byte cap exactly: one upstream chunk can be larger than
+    // the cap on its own, so slice after concat rather than trusting chunk size.
+    return new TextDecoder().decode(Buffer.concat(chunks).subarray(0, maxBytes));
   } catch {
     // A mid-read failure (or caller abort): diagnose with nothing, like the
     // old read-everything path which swallowed body errors the same way.
@@ -363,9 +365,11 @@ async function readCappedResponseBody(
     while (true) {
       const part = await raceWithSignal(reader.read(), signal);
       if (part.done) break;
+      // Check the cap before retaining the chunk: a single oversized chunk
+      // must trip the cap without being buffered into memory whole first.
+      if (bytes + part.value.byteLength > maxBytes) return { text: "", oversize: true };
       chunks.push(part.value);
       bytes += part.value.byteLength;
-      if (bytes > maxBytes) return { text: "", oversize: true };
     }
     return { text: new TextDecoder().decode(Buffer.concat(chunks, bytes)), oversize: false };
   } finally {

@@ -425,6 +425,75 @@ describe("Dani-Free failover chain", () => {
     expect(reason).toContain(String(MAX_UPSTREAM_RESPONSE_BYTES));
   });
 
+  it("caps the error snippet at 2 KiB even when a single upstream chunk is larger", async () => {
+    const decodedLengths: number[] = [];
+    const realDecode = TextDecoder.prototype.decode;
+    const decode = spyOn(TextDecoder.prototype, "decode").mockImplementation(function (
+      this: TextDecoder,
+      input?: BufferSource,
+      options?: TextDecodeOptions,
+    ) {
+      if (input instanceof ArrayBuffer) decodedLengths.push(input.byteLength);
+      else if (ArrayBuffer.isView(input)) decodedLengths.push(input.byteLength);
+      return realDecode.call(this, input as BufferSource, options);
+    });
+    try {
+      const oneHugeChunk = new Uint8Array(100_000).fill(65); // single 100 KiB chunk
+      const router = createRouter({
+        failoverBackoffMs: 1,
+        adapters: [adapter("kilo", [model("kilo", primaryId)], async () => {
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(oneHugeChunk);
+              controller.close();
+            },
+          });
+          return new Response(stream, { status: 502, statusText: "Bad Gateway" });
+        })],
+      });
+      const response = await router.handle(chat("kilo/" + primaryId));
+      expect(response.status).toBe(503);
+      const body = await response.json();
+      expect(body.error.code).toBe("all_models_failed");
+      expect(String(body.attempts[0].reason)).toContain("upstream 502");
+    } finally {
+      decode.mockRestore();
+    }
+    // Every decode input in the request lifetime (body read + error snippet)
+    // stayed within the 2 KiB snippet cap: the 100 KiB chunk was never decoded whole.
+    expect(decodedLengths.length).toBeGreaterThan(0);
+    expect(Math.max(...decodedLengths)).toBeLessThanOrEqual(2048);
+  });
+
+  it("fails over on a single oversized 200 chunk without buffering it first", async () => {
+    const calls: string[] = [];
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    // One chunk already over the cap: the router must trip the cap without
+    // retaining the chunk.
+    const oneHugeChunk = new TextEncoder().encode("x".repeat(MAX_UPSTREAM_RESPONSE_BYTES + 1));
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        if (request.model === "a") {
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(oneHugeChunk);
+              controller.close();
+            },
+          });
+          return new Response(stream, { headers: { "content-type": "application/json" } });
+        }
+        return Response.json(full);
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(full);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
   it("accepts tool calls as real content without failing over", async () => {
     let calls = 0;
     const toolCall = { choices: [{ message: { content: null, tool_calls: [{ id: "1", type: "function" }] }, finish_reason: "tool_calls" }] };
