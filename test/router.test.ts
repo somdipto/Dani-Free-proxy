@@ -1,6 +1,6 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { KiloBackendError } from "../src/adapters/kilo";
-import { createRouter, DEFAULT_PRIMARY_MODEL } from "../src/router";
+import { createRouter, DEFAULT_PRIMARY_MODEL, MAX_UPSTREAM_RESPONSE_BYTES } from "../src/router";
 import type { BackendAdapter, BackendId, BackendModel, ChatRequest } from "../src/types";
 
 function model(backend: BackendId, id: string): BackendModel {
@@ -357,6 +357,45 @@ describe("Dani-Free failover chain", () => {
     expect(await response.json()).toEqual(full);
     expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
     expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("fails over when an upstream 200 JSON body exceeds the read cap", async () => {
+    const calls: string[] = [];
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    // Just over the cap: the router refuses to buffer it whole.
+    const oversized = "x".repeat(MAX_UPSTREAM_RESPONSE_BYTES + 1);
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        if (request.model === "a") {
+          return new Response(oversized, { headers: { "content-type": "application/json" } });
+        }
+        return Response.json(full);
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(full);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("reports the oversize body in the all-models-failed reason", async () => {
+    const oversized = "x".repeat(MAX_UPSTREAM_RESPONSE_BYTES + 1);
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", primaryId)], async () => {
+        return new Response(oversized, { headers: { "content-type": "application/json" } });
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.error.code).toBe("all_models_failed");
+    const reason: string = body.attempts[0].reason;
+    expect(reason).toContain("exceeding");
+    expect(reason).toContain(String(MAX_UPSTREAM_RESPONSE_BYTES));
   });
 
   it("accepts tool calls as real content without failing over", async () => {

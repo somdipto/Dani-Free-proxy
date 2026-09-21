@@ -291,6 +291,13 @@ function upstreamReason(status: number, statusText: string | undefined, detail: 
 const MAX_UPSTREAM_ERROR_SNIPPET_BYTES = 2_048;
 
 /**
+ * Max upstream 200-body bytes buffered while checking for the empty-content
+ * quirk. A real chat-completion payload is small; an anomalous multi-MB
+ * body must fail over instead of being buffered into memory whole.
+ */
+export const MAX_UPSTREAM_RESPONSE_BYTES = 8_388_608;
+
+/**
  * Read at most `maxBytes` of an upstream error body for the failover reason,
  * then stop the stream. A bloated upstream error page (multi-MB gateway HTML
  * on a 502) must not be fully buffered just to diagnose the failure.
@@ -314,6 +321,36 @@ async function readUpstreamSnippet(response: Response, signal: AbortSignal, maxB
     return "";
   } finally {
     // Stop pulling the rest of the body once we have the snippet.
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
+
+/**
+ * Buffer an upstream 200 body up to `maxBytes` for the empty-content guard.
+ * Returns `oversize: true` when the body exceeds the cap: the caller fails
+ * over instead of buffering an anomalous multi-MB completion into memory.
+ * The remainder is cancelled, like the error-snippet reader.
+ */
+async function readCappedResponseBody(
+  response: Response,
+  signal: AbortSignal,
+  maxBytes = MAX_UPSTREAM_RESPONSE_BYTES,
+): Promise<{ text: string; oversize: boolean }> {
+  if (!response.body) return { text: "", oversize: false };
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const part = await raceWithSignal(reader.read(), signal);
+      if (part.done) break;
+      chunks.push(part.value);
+      bytes += part.value.byteLength;
+      if (bytes > maxBytes) return { text: "", oversize: true };
+    }
+    return { text: new TextDecoder().decode(Buffer.concat(chunks, bytes)), oversize: false };
+  } finally {
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
@@ -853,13 +890,21 @@ export class Router {
       // is handed to the client there is no failing over.
       if (!streaming && isJsonResponse(response)) {
         let text: string;
+        let oversize = false;
         try {
-          text = await response.text();
+          ({ text, oversize } = await readCappedResponseBody(response, signal));
         } catch (error) {
           if (isAbort(error)) throw error;
           // A mid-body upstream failure is handed to the client as-is rather
           // than failed over, preserving the upstream's error surface.
           return withModelHeader(failedBodyResponse(response, error), selector);
+        }
+        if (oversize) {
+          failures.push({
+            model: selector,
+            reason: `upstream returned 200 with a body exceeding ${MAX_UPSTREAM_RESPONSE_BYTES} bytes`,
+          });
+          continue;
         }
         let payload: unknown;
         let parseable = true;
