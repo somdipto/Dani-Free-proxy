@@ -590,7 +590,19 @@ export class Router {
   }
 
   async models(signal?: AbortSignal): Promise<BackendModel[]> {
-    const groups = await Promise.all(this.adapters.map((adapter) => this.modelsFor(adapter, signal)));
+    // One backend's failed discovery must not take the whole listing (or the
+    // derived chain) down: its models are simply absent. Cancellation and the
+    // overall deadline still abort the request.
+    const groups = await Promise.all(
+      this.adapters.map(async (adapter): Promise<BackendModel[]> => {
+        try {
+          return await this.modelsFor(adapter, signal);
+        } catch (error) {
+          if (isAbort(error)) throw error;
+          return [];
+        }
+      }),
+    );
     return groups.flat().filter((model) => !this.allowedModels || this.allowedModels.has(modelSelectorId(model)));
   }
 
@@ -655,7 +667,17 @@ export class Router {
     for (const selector of selectors) {
       if (seen.has(selector)) continue;
       seen.add(selector);
-      const route = await this.resolveExplicit(selector, signal);
+      let route: Route | Response;
+      try {
+        route = await this.resolveExplicit(selector, signal);
+      } catch (error) {
+        // A backend whose discovery fails (network error, misconfigured
+        // sidecar, …) is skipped so the failover chain keeps walking the
+        // remaining backends. Client cancellation and the overall deadline
+        // still abort the request.
+        if (isAbort(error)) throw error;
+        continue;
+      }
       if (route instanceof Response) continue;
       routes.push(route);
     }
