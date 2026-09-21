@@ -6,6 +6,7 @@ import type {
   ChatMessage,
   ChatRequest,
 } from "../types.ts";
+import { readCappedJson } from "./capped-json";
 
 /**
  * OpenCode backend adapter.
@@ -125,30 +126,11 @@ const MAX_OPENCODE_ERROR_BODY_BYTES = 2_048;
  */
 export const MAX_OPENCODE_DISCOVERY_BYTES = 1_048_576;
 
-/** Parse a JSON response body, refusing to buffer more than `maxBytes` first. */
-async function readCappedJson(response: Response, maxBytes = MAX_OPENCODE_DISCOVERY_BYTES): Promise<unknown> {
-  if (!response.body) throw new Error("OpenCode sidecar returned an empty /config/providers response");
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let bytes = 0;
-  try {
-    while (true) {
-      const part = await reader.read();
-      if (part.done) break;
-      // Check the cap before retaining the chunk: a single oversized chunk
-      // must trip the cap without being buffered into memory whole first.
-      if (bytes + part.value.byteLength > maxBytes) {
-        throw new Error(`OpenCode sidecar returned a /config/providers response exceeding ${maxBytes} bytes`);
-      }
-      chunks.push(part.value);
-      bytes += part.value.byteLength;
-    }
-    return JSON.parse(new TextDecoder().decode(Buffer.concat(chunks, bytes)));
-  } finally {
-    await reader.cancel().catch(() => undefined);
-    reader.releaseLock();
-  }
-}
+/** Failure messages for the shared capped-JSON discovery reader. */
+const DISCOVERY_MESSAGES = {
+  empty: "OpenCode sidecar returned an empty /config/providers response",
+  oversize: (maxBytes: number) => `OpenCode sidecar returned a /config/providers response exceeding ${maxBytes} bytes`,
+} as const;
 
 /** Free ids: provider ids ending in `-free`, plus opencode's own free model. */
 function isFreeModelId(id: string): boolean {
@@ -415,7 +397,7 @@ export class OpenCodeAdapter implements BackendAdapter {
       // Oversize bodies hit the 1 MiB discovery cap and throw: the
       // soft-failure posture below keeps listModels returning no models, so
       // the failover chain walks the remaining backends.
-      payload = await readCappedJson(response);
+      payload = await readCappedJson(response, MAX_OPENCODE_DISCOVERY_BYTES, DISCOVERY_MESSAGES);
     } catch {
       return [];
     }

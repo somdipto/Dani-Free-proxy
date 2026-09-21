@@ -5,6 +5,7 @@ import type {
   ChatRequest,
 } from "../types.ts";
 import { redactDiagnostics } from "../redact";
+import { readCappedJson } from "./capped-json";
 
 const BACKEND_ID = "mimo" as const;
 const DEFAULT_CONTEXT_WINDOW = 0;
@@ -188,30 +189,11 @@ type OwnedProcess = {
  */
 export const MAX_MIMO_DISCOVERY_BYTES = 1_048_576;
 
-/** Parse a JSON response body, refusing to buffer more than `maxBytes` first. */
-async function readCappedJson(response: Response, maxBytes = MAX_MIMO_DISCOVERY_BYTES): Promise<unknown> {
-  if (!response.body) throw new Error("MiMo Code discovery returned an empty response");
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let bytes = 0;
-  try {
-    while (true) {
-      const part = await reader.read();
-      if (part.done) break;
-      // Check the cap before retaining the chunk: a single oversized chunk
-      // must trip the cap without being buffered into memory whole first.
-      if (bytes + part.value.byteLength > maxBytes) {
-        throw new Error(`MiMo Code discovery response exceeds ${maxBytes} bytes`);
-      }
-      chunks.push(part.value);
-      bytes += part.value.byteLength;
-    }
-    return JSON.parse(new TextDecoder().decode(Buffer.concat(chunks, bytes)));
-  } finally {
-    await reader.cancel().catch(() => undefined);
-    reader.releaseLock();
-  }
-}
+/** Failure messages for the shared capped-JSON discovery reader. */
+const DISCOVERY_MESSAGES = {
+  empty: "MiMo Code discovery returned an empty response",
+  oversize: (maxBytes: number) => `MiMo Code discovery response exceeds ${maxBytes} bytes`,
+} as const;
 
 /**
  * The route and payload shapes below are from Xiaomi's official @mimo-ai/sdk
@@ -350,7 +332,7 @@ export default class MimoAdapter implements BackendAdapter {
       // catch below keeps the adapter's soft-failure posture (the router
       // absorbs per-backend discovery failures) so the failover chain walks
       // the remaining backends.
-      body = await readCappedJson(response);
+      body = await readCappedJson(response, MAX_MIMO_DISCOVERY_BYTES, DISCOVERY_MESSAGES);
     } catch {
       throw new Error("MiMo Code model discovery returned invalid JSON");
     }
@@ -387,7 +369,7 @@ export default class MimoAdapter implements BackendAdapter {
     try {
       // Same 1 MiB discovery cap as the /models path above: an oversized
       // /provider body must not be buffered whole on cache misses.
-      body = await readCappedJson(response);
+      body = await readCappedJson(response, MAX_MIMO_DISCOVERY_BYTES, DISCOVERY_MESSAGES);
     } catch {
       throw new Error("MiMo OpenCode provider discovery returned invalid JSON");
     }
