@@ -48,7 +48,7 @@ The Kilo-only listener on `:4290` advertises the three Kilo ids and pins `auto` 
 
 The `model` selector is one of:
 
-- `auto` — exact alias of `opencode/nemotron-3-ultra-free`.
+- `auto` — the ordered failover chain, starting at `opencode/nemotron-3-ultra-free` and failing over to the next healthy model (OpenCode-first, then Kilo) on retryable errors. Not an alias: if nemotron fails, the request is served by another model.
 - the six ids from `GET /v1/models`: `opencode/nemotron-3-ultra-free`, `opencode/muse-spark-1.3-contributor-free`, `opencode/mimo-v2.5-free`, `kilo/nex-agi/nex-n2.5-pro:free`, `kilo/dots-studio/dots-3-note-preview:free`, `kilo/nex-agi/nex-n2.5-mini:free`.
 - any other selector — rejected unless the caller supplied a custom adapter set and allowlist.
 
