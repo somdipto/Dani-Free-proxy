@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { OpenCodeAdapter, OpenCodeError } from "../src/adapters/opencode";
+import { OpenCodeAdapter, OpenCodeError, MAX_OPENCODE_DISCOVERY_BYTES } from "../src/adapters/opencode";
 import type { BackendModel } from "../src/types";
 
 const BASE = "http://127.0.0.1:4187";
@@ -144,6 +144,23 @@ describe("OpenCodeAdapter", () => {
     expect(byId.get("opencode/big-pickle")?.name).toBe("Big Pickle");
     expect(models.every((model) => model.healthy)).toBe(true);
     expect(models.every((model) => model.source === "discovered")).toBe(true);
+  });
+
+  it("returns no models instead of buffering an oversized /config/providers body", async () => {
+    // A >1 MiB discovery body must trip the read cap instead of being
+    // buffered whole: the adapter keeps its soft-failure posture and the
+    // failover chain walks the remaining backends. The payload below is a
+    // VALID providers document, so a cap-less parse would have returned the
+    // three free models — the [] below proves the cap fired before buffering.
+    const padding = "x".repeat(MAX_OPENCODE_DISCOVERY_BYTES + 8);
+    const oversized = new Response(
+      new TextEncoder().encode(JSON.stringify({ providers: PROVIDERS_PAYLOAD.providers, padding })),
+      { headers: { "content-type": "application/json" } },
+    );
+    const stub = (async (_input: string | URL | Request, _init: RequestInit = {}) =>
+      oversized) as unknown as typeof fetch;
+    const adapter = new OpenCodeAdapter({ baseUrl: BASE, apiKey: "", fetch: stub });
+    await expect(adapter.listModels()).resolves.toEqual([]);
   });
 
   it("completes via the session API and returns valid OpenAI SSE", async () => {

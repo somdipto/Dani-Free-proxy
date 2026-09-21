@@ -412,7 +412,10 @@ export class OpenCodeAdapter implements BackendAdapter {
 
     let payload: unknown;
     try {
-      payload = await response.json();
+      // Oversize bodies hit the 1 MiB discovery cap and throw: the
+      // soft-failure posture below keeps listModels returning no models, so
+      // the failover chain walks the remaining backends.
+      payload = await readCappedJson(response);
     } catch {
       return [];
     }
