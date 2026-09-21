@@ -64,6 +64,8 @@ If `DANI_FREE_API_KEY` is configured, send it as:
 Authorization: Bearer <DANI_FREE_API_KEY>
 ```
 
+or, equivalently, as the `x-api-key` header with the same value (the Bearer <redacted> is matched case-insensitively). The router's own CLI sends both.
+
 Never put a real key in a checked-in config, prompt, fixture, or diagnostic report.
 
 ## 3. Model selection
@@ -281,7 +283,7 @@ An agent integrating Dani-Free should follow this sequence:
 
 | Result | Meaning | Action |
 |---|---|---|
-| `401` | Dani-Free client key is missing or invalid | Send the configured bearer key |
+| `401` | Dani-Free client key is missing or invalid | Send the configured key as `Bearer <key>` or the `x-api-key` header |
 | `413 request_too_large` | Request body exceeds `DANI_FREE_BODY_LIMIT_BYTES` (default 4 MiB) | Shrink the request (fewer/longer-turn messages) or raise the cap |
 | `403` | Upstream credential rejected (passed through as-is) | Check backend credentials |
 | `404` | Wrong Dani-Free route, explicit backend, or model selector | Check the exact selector; do not fall back |

@@ -31,7 +31,7 @@ The router keeps a five-second model-discovery cache. The request deadline start
 | --- | --- |
 | `DANI_FREE_HOST` | Bind address; defaults to `127.0.0.1`. |
 | `DANI_FREE_PORT` | Listen port; defaults to `4190`. |
-| `DANI_FREE_API_KEY` | Optional client API key. When set, clients must send `Authorization: Bearer <value>`. |
+| `DANI_FREE_API_KEY` | Optional client API key. When set, clients must send `Authorization: Bearer <value>` (case-insensitive scheme) or the `x-api-key` header with the same value. |
 | `DANI_FREE_KILO_BASE_URL` | Verified Kilo Code endpoint. Defaults to `https://api.kilo.ai/api/gateway`. |
 | `DANI_FREE_KILO_API_KEY` | Kilo Code endpoint credential, if required. |
 | `DANI_FREE_OPENCODE_BASE_URL` | `opencode serve` sidecar base URL. Defaults to `http://127.0.0.1:4187`. |
