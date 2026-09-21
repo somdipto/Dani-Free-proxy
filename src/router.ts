@@ -440,27 +440,35 @@ function chatCompletionHasContent(payload: unknown): boolean | undefined {
 /**
  * Extract the message from an upstream HTTP 200 body that is an error envelope
  * instead of a completion. Some gateways signal a refusal with a 200 using an
- * OpenAI-style envelope (`{ "error": { "message": ... } }`), and others send
- * the refusal as a bare string (`{ "error": "quota exceeded" }`); without this
- * check the envelope would reach the client as a "successful" 200 and the
+ * OpenAI-style envelope (`{ "error": { "message": ... } }`), others send the
+ * refusal as a bare string (`{ "error": "quota exceeded" }`), and others as a
+ * list of strings (`{ "error": ["quota exceeded", "retry later"] }`); without
+ * this check the envelope would reach the client as a "successful" 200 and the
  * attempt would count as answered, so no failover would happen. Returns
  * undefined for a genuine completion: a real chat completion never carries a
  * top-level error envelope, so a contentful answer always wins over a stray
  * "error" key.
  */
+
+/** Flatten a string-or-string-array error value to one message. */
+function envelopeText(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0)
+      .join("; ");
+  }
+  return "";
+}
+
 function errorEnvelopeMessage(payload: unknown): string | undefined {
   if (!isRecord(payload)) return undefined;
   const error = payload.error;
-  const message =
-    typeof error === "string"
-      ? error.trim()
-      : isRecord(error)
-        ? typeof error.message === "string"
-          ? error.message.trim()
-          : typeof error.detail === "string"
-            ? error.detail.trim()
-            : ""
-        : "";
+  const message = isRecord(error)
+    ? envelopeText(error.message) || envelopeText(error.detail)
+    : envelopeText(error);
   if (!message) return undefined;
   if (chatCompletionHasContent(payload) === true) return undefined;
   return message;
@@ -875,8 +883,8 @@ export class Router {
   /**
    * Walk the chain until one model returns a real answer.
    * Retryable: network errors, upstream timeouts (including HTTP 408), 429, 5xx,
-   * and HTTP 200 with empty/no text content or a body exceeding the
-   * MAX_UPSTREAM_RESPONSE_BYTES buffer cap. Never fails over after response bytes
+   * and HTTP 200 with an error envelope, invalid JSON, empty/no text content,
+   * or a body exceeding the MAX_UPSTREAM_RESPONSE_BYTES buffer cap. Never fails over after response bytes
    * have been emitted to the client. All attempts share the caller's remaining
    * deadline via `signal`.
    */
