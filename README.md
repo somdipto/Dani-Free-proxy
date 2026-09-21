@@ -37,6 +37,7 @@ The router keeps a five-second model-discovery cache. The request deadline start
 | `DANI_FREE_OPENCODE_BASE_URL` | `opencode serve` sidecar base URL. Defaults to `http://127.0.0.1:4187`. |
 | `DANI_FREE_OPENCODE_API_KEY` | Sidecar password, only when the sidecar runs with `OPENCODE_SERVER_PASSWORD`. Sent as HTTP Basic `opencode:<key>`; never as a Bearer token and never to any remote API. |
 | `DANI_FREE_BODY_LIMIT_BYTES` | Incoming request-body size cap; defaults to 4 MiB. Bodies larger than the cap are rejected with a 413 `request_too_large` (the router library default is 1 MiB when no config is used). |
+| `DANI_FREE_REQUEST_TIMEOUT_MS` | Single request deadline in milliseconds, shared across incoming body, discovery, completion, and streamed response EOF; defaults to 180_000 for the standard listener and 120_000 for the Kilo-only listener. Must be an integer between 100 and 300_000. |
 
 The Kilo-only listener on `:4290` advertises the three Kilo ids and pins `auto` to Nex Pro.
 
