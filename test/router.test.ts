@@ -77,58 +77,261 @@ function clock() {
 
 const primaryId = DEFAULT_PRIMARY_MODEL.slice("kilo/".length);
 
-describe("Dani-Free single-model routing", () => {
-  it("pins auto to the configured primary, independent of adapter/model order", async () => {
+describe("Dani-Free failover chain", () => {
+  it("walks auto through the chain OpenCode-first until one answers", async () => {
     const calls: string[] = [];
-    const router = createRouter([
-      adapter("opencode", [model("opencode", "legacy")], async () => { calls.push("opencode"); return Response.json({}); }),
-      adapter("mimo", [model("mimo", "other")], async () => { calls.push("mimo"); return Response.json({}); }),
-      adapter("kilo", [model("kilo", "other"), model("kilo", primaryId)], async (request) => {
-        calls.push(request.model);
-        return Response.json({ selected: request.model });
-      }),
-    ]);
-    expect(await (await router.handle(chat())).json()).toEqual({ selected: primaryId });
-    expect(calls).toEqual([primaryId]);
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [
+        adapter("opencode", [model("opencode", "legacy")], async () => { calls.push("opencode"); return Response.json({}); }),
+        adapter("mimo", [model("mimo", "other")], async () => { calls.push("mimo"); return Response.json({}); }),
+        adapter("kilo", [model("kilo", "other"), model("kilo", primaryId)], async (request) => {
+          calls.push(request.model);
+          return Response.json({ selected: request.model });
+        }),
+      ],
+    });
+    const response = await router.handle(chat());
+    expect(await response.json()).toEqual({});
+    expect(response.headers.get("x-dani-free-model")).toBe("opencode/legacy");
+    expect(calls).toEqual(["opencode"]);
   });
 
-  it.each([429, 503])("returns HTTP %s intact without another model attempt", async (status) => {
+  it("honours an explicit modelChain order", async () => {
     const calls: string[] = [];
-    const router = createRouter([
-      adapter("kilo", [model("kilo", primaryId), model("kilo", "other")], async (request) => {
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      modelChain: ["kilo/b", "kilo/a"],
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        return Response.json({ ok: request.model });
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(await response.json()).toEqual({ ok: "b" });
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["b"]);
+  });
+
+  it("fails over after a 429 and labels the model that answered", async () => {
+    const calls: string[] = [];
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        if (request.model === "a") return new Response("slow down", { status: 429, statusText: "Too Many Requests" });
+        return Response.json({ ok: "b" });
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: "b" });
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("tries an explicit model first, then the rest of the chain excluding it", async () => {
+    const calls: string[] = [];
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [
+        adapter("opencode", [model("opencode", "c")], async (request) => { calls.push(request.model); return Response.json({ ok: "c" }); }),
+        adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+          calls.push(request.model);
+          return new Response("congested", { status: 429 });
+        }),
+      ],
+    });
+    const response = await router.handle(chat("kilo/a"));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: "c" });
+    expect(response.headers.get("x-dani-free-model")).toBe("opencode/c");
+    expect(calls).toEqual(["a", "c"]);
+  });
+
+  it.each([429, 503])("fails over on HTTP %s and reports every attempt when the chain is exhausted", async (status) => {
+    const calls: string[] = [];
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", primaryId), model("kilo", "other")], async (request) => {
         calls.push(request.model);
         return new Response("quota exhausted", { status, statusText: "Upstream refusal" });
-      }),
-      adapter("mimo", [model("mimo", "other")], async () => { calls.push("mimo"); return Response.json({}); }),
-    ]);
+      })],
+    });
     const response = await router.handle(chat());
-    expect([response.status, response.statusText, await response.text()]).toEqual([status, "Upstream refusal", "quota exhausted"]);
-    expect(calls).toEqual([primaryId]);
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.error.code).toBe("all_models_failed");
+    expect(body.attempts.map((attempt: { model: string }) => attempt.model)).toEqual([`kilo/${primaryId}`, "kilo/other"]);
+    expect(body.attempts[0].status).toBe(status);
+    expect(body.attempts[0].reason).toContain(String(status));
+    expect(calls).toEqual([primaryId, "other"]);
   });
 
-  it.each([401, 429, 503])("preserves typed HTTP %s errors and never retries", async (status) => {
+  it("passes through a non-retryable 401 without failing over", async () => {
     let calls = 0;
-    const router = createRouter([adapter("kilo", [model("kilo", primaryId), model("kilo", "other")], async () => {
-      calls++;
-      throw new KiloBackendError("http://upstream", status, "Gateway refusal", '{"error":"exhausted"}');
-    })]);
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", primaryId), model("kilo", "other")], async () => {
+        calls++;
+        throw new KiloBackendError("http://upstream", 401, "Gateway refusal", '{"error":"exhausted"}');
+      })],
+    });
     const response = await router.handle(chat());
-    expect([response.status, response.statusText, await response.text()]).toEqual([status, "Gateway refusal", '{"error":"exhausted"}']);
+    expect([response.status, response.statusText, await response.text()]).toEqual([401, "Gateway refusal", '{"error":"exhausted"}']);
     expect(calls).toBe(1);
   });
 
-  it("does not replace a missing or unhealthy primary with a healthy alternative", async () => {
+  it.each([429, 503])("fails over on retryable typed HTTP %s errors", async (status) => {
+    const calls: string[] = [];
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", primaryId), model("kilo", "other")], async (request) => {
+        calls.push(request.model);
+        throw new KiloBackendError("http://upstream", status, "Gateway refusal", '{"error":"exhausted"}');
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.error.code).toBe("all_models_failed");
+    expect(body.attempts).toHaveLength(2);
+    expect(body.attempts[0].reason).toContain("exhausted");
+    expect(calls).toEqual([primaryId, "other"]);
+  });
+
+  it("returns 503 with per-model reasons when every model fails differently", async () => {
+    const calls: string[] = [];
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [
+        adapter("opencode", [model("opencode", "c")], async (request) => {
+          calls.push(request.model);
+          return new Response("limited", { status: 429 });
+        }),
+        adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+          calls.push(request.model);
+          if (request.model === "a") throw new Error("socket hangup");
+          return new Response("broken", { status: 500, statusText: "Bad Gateway" });
+        }),
+      ],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.error.code).toBe("all_models_failed");
+    expect(body.attempts.map((attempt: { model: string }) => attempt.model)).toEqual(["opencode/c", "kilo/a", "kilo/b"]);
+    expect(body.attempts[0].reason).toContain("429");
+    expect(body.attempts[1].reason).toContain("socket hangup");
+    expect(body.attempts[2].reason).toContain("500");
+    expect(body.error.message).toContain("opencode/c");
+    expect(calls).toEqual(["c", "a", "b"]);
+  });
+
+  it("does not fail over on a non-retryable 400", async () => {
+    const calls: string[] = [];
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        if (request.model === "a") return new Response("bad request", { status: 400 });
+        return Response.json({ ok: "b" });
+      })],
+    });
+    const response = await router.handle(chat());
+    expect([response.status, await response.text()]).toEqual([400, "bad request"]);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/a");
+    expect(calls).toEqual(["a"]);
+  });
+
+  it("treats HTTP 200 with empty content as a retryable failure", async () => {
+    const calls: string[] = [];
+    const empty = { choices: [{ message: { content: null }, finish_reason: "stop" }] };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        return Response.json(request.model === "a" ? empty : full);
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(full);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("accepts tool calls as real content without failing over", async () => {
+    let calls = 0;
+    const toolCall = { choices: [{ message: { content: null, tool_calls: [{ id: "1", type: "function" }] }, finish_reason: "tool_calls" }] };
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", primaryId)], async () => {
+        calls++;
+        return Response.json(toolCall);
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(toolCall);
+    expect(calls).toBe(1);
+  });
+
+  it("fails over a 429 before streaming starts and labels the answering model", async () => {
+    const calls: string[] = [];
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        if (request.model === "a") return new Response("slow down", { status: 429 });
+        return new Response('data: {"delta":"hi"}\n\ndata: [DONE]\n\n', {
+          headers: { "content-type": "text/event-stream" },
+        });
+      })],
+    });
+    const response = await router.handle(chat("auto", { stream: true }));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(await response.text()).toContain("data:");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("auto skips missing or unhealthy chain models while explicit unhealthy still 503s", async () => {
     let calls = 0;
     const other = model("kilo", "other");
-    const primary = { ...model("kilo", primaryId), healthy: false };
-    for (const models of [[other], [other, primary]]) {
-      const router = createRouter([adapter("kilo", models, async () => { calls++; return Response.json({}); })]);
-      const response = await router.handle(chat());
-      expect(response.status).toBe(models.length === 1 ? 404 : 503);
-      await response.text();
-    }
-    expect(calls).toBe(0);
+    const unhealthyPrimary = { ...model("kilo", primaryId), healthy: false };
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [other, unhealthyPrimary], async () => {
+        calls++;
+        return Response.json({ ok: true });
+      })],
+    });
+    const auto = await router.handle(chat());
+    expect(auto.status).toBe(200);
+    expect(await auto.json()).toEqual({ ok: true });
+    expect(auto.headers.get("x-dani-free-model")).toBe("kilo/other");
+    expect(calls).toBe(1);
+    const explicit = await router.handle(chat(`kilo/${primaryId}`));
+    expect(explicit.status).toBe(503);
+    expect((await explicit.json()).error.code).toBe("model_unavailable");
+    expect(calls).toBe(1);
   });
+
+  it("auto uses the healthy chain when the primary is simply absent", async () => {
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "other")], async () => Response.json({ ok: true }))],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/other");
+  });
+});
+
+describe("Dani-Free single-model routing", () => {
 
   it.each([
     { tools: [{ type: "function", function: { name: "lookup" } }] },

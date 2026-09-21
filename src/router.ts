@@ -13,12 +13,23 @@ export interface RouterOptions {
   maxBodyBytes?: number;
   primaryModel?: string;
   allowedModels?: readonly string[];
+  /**
+   * Ordered full selectors (e.g. "opencode/foo", "kilo/bar:free") forming the
+   * failover chain. When omitted, the chain is derived from the allowed roster
+   * (or discovered models), ordered OpenCode-first, then Kilo.
+   */
+  modelChain?: string[];
+  /** Base backoff before the next chain attempt after a 429. Defaults to 1000ms. */
+  failoverBackoffMs?: number;
 }
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
 export const DEFAULT_MAX_BODY_BYTES = 1_048_576;
 const MODEL_CACHE_TTL_MS = 5_000;
 export const DEFAULT_PRIMARY_MODEL = "kilo/nex-agi/nex-n2.5-pro:free";
+export const DEFAULT_FAILOVER_BACKOFF_MS = 1_000;
+/** Response header naming the selector that actually answered the request. */
+export const ANSWERED_MODEL_HEADER = "x-dani-free-model";
 
 const BACKENDS = ["opencode", "kilo", "mimo"] as const;
 
@@ -228,6 +239,139 @@ function responseFromStatusError(error: unknown): Response | undefined {
   return new Response(body, { status, statusText, headers: { "content-type": "text/plain; charset=utf-8" } });
 }
 
+const BACKEND_CHAIN_PRIORITY: Record<string, number> = { opencode: 0, kilo: 1, mimo: 2 };
+
+/** Stable OpenCode-first, then Kilo, then everything else. Founder priority. */
+function opencodeFirst(selectors: string[]): string[] {
+  const rank = (selector: string): number => {
+    const separator = selector.indexOf("/");
+    const backend = separator > 0 ? selector.slice(0, separator) : "";
+    return BACKEND_CHAIN_PRIORITY[backend] ?? 3;
+  };
+  return [...selectors].sort((a, b) => rank(a) - rank(b));
+}
+
+function withModelHeader(response: Response, selector: string): Response {
+  const headers = new Headers(response.headers);
+  headers.set(ANSWERED_MODEL_HEADER, selector);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+function sanitizeReason(error: unknown, fallback: string): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const cleaned = raw
+    .replace(/https?:\/\/[^\s)"']+/g, "[url]")
+    .replace(/bearer\s+[^\s]+/gi, "Bearer [redacted]")
+    .trim();
+  const text = cleaned || fallback;
+  return text.length > 200 ? `${text.slice(0, 197)}...` : text;
+}
+
+function upstreamReason(status: number, statusText: string | undefined, detail: string): string {
+  const head = `upstream ${status}${statusText ? ` ${statusText}` : ""}`;
+  const trimmed = detail.trim();
+  const short = trimmed.length > 120 ? `${trimmed.slice(0, 117)}...` : trimmed;
+  return short ? `${head}: ${short}` : head;
+}
+
+/** Prefer a short human detail from a typed error body over the raw message. */
+function errorBodyDetail(error: unknown): string {
+  if (!isRecord(error)) return "";
+  const body = error.body;
+  if (typeof body !== "string" || !body.trim()) return "";
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (isRecord(parsed)) {
+      const nested = isRecord(parsed.error) ? parsed.error : parsed;
+      for (const key of ["message", "detail", "error"]) {
+        const value = nested[key];
+        if (typeof value === "string" && value.trim()) return value.trim();
+      }
+    }
+  } catch {
+    // Fall through to the raw body below.
+  }
+  return body.trim();
+}
+
+function statusTextOf(error: unknown): string | undefined {
+  return isRecord(error) && typeof error.statusText === "string" ? error.statusText : undefined;
+}
+
+function retryableStatusReason(error: unknown, status: number, fallback: string): string {
+  const detail = errorBodyDetail(error) || sanitizeReason(error, fallback);
+  return upstreamReason(status, statusTextOf(error), detail);
+}
+
+/**
+ * True when a parsed JSON body carries real answer text (or tool calls),
+ * false when it is an empty chat completion (the Kilo empty-content quirk),
+ * undefined when it is not a chat-completion shape at all (opaque: pass through).
+ */
+function chatCompletionHasContent(payload: unknown): boolean | undefined {
+  if (!isRecord(payload)) return undefined;
+  const choices = payload.choices;
+  if (!Array.isArray(choices)) return undefined;
+  if (choices.length === 0) return false;
+  const choice = choices[0];
+  if (!isRecord(choice)) return false;
+  const message = isRecord(choice.message) ? choice.message : isRecord(choice.delta) ? choice.delta : undefined;
+  if (!message) return false;
+  const content = message.content;
+  if (typeof content === "string") return content.trim().length > 0;
+  if (Array.isArray(content)) {
+    return content.some(
+      (part) => isRecord(part) && typeof part.text === "string" && part.text.trim().length > 0,
+    );
+  }
+  const toolCalls = message.tool_calls;
+  if (Array.isArray(toolCalls) && toolCalls.length > 0) return true;
+  return false;
+}
+
+interface AttemptFailure {
+  model: string;
+  reason: string;
+  status?: number;
+}
+
+function allModelsFailedResponse(failures: AttemptFailure[]): Response {
+  const summary = failures.map((failure) => `${failure.model}: ${failure.reason}`).join("; ");
+  return json(
+    {
+      error: {
+        message: `All ${failures.length} model${failures.length === 1 ? "" : "s"} in the failover chain failed${summary ? `: ${summary}` : ""}`,
+        type: "api_error",
+        code: "all_models_failed",
+      },
+      attempts: failures,
+    },
+    503,
+  );
+}
+
+function isJsonResponse(response: Response): boolean {
+  return (response.headers.get("content-type") ?? "").toLowerCase().includes("json");
+}
+
+/** A Response whose body immediately fails with the upstream's read error. */
+function failedBodyResponse(response: Response, error: unknown): Response {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.error(error);
+    },
+  });
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
 
 async function readBody(request: Request, maxBodyBytes: number, signal: AbortSignal): Promise<string | Response> {
   if (signal.aborted) throw abortError(signal);
@@ -390,7 +534,9 @@ export class Router {
   readonly maxBodyBytes: number;
   readonly apiKey?: string;
   readonly primaryModel: string;
+  readonly failoverBackoffMs: number;
   private readonly allowedModels?: ReadonlySet<string>;
+  private readonly modelChain?: string[];
   private readonly modelCache = new Map<string, {
     expiresAt: number;
     models?: BackendModel[];
@@ -404,6 +550,8 @@ export class Router {
     this.apiKey = options.apiKey ?? process.env.DANI_FREE_API_KEY;
     this.primaryModel = options.primaryModel ?? DEFAULT_PRIMARY_MODEL;
     this.allowedModels = options.allowedModels ? new Set(options.allowedModels) : undefined;
+    this.modelChain = options.modelChain?.map((selector) => selector.trim()).filter((selector) => selector.length > 0);
+    this.failoverBackoffMs = options.failoverBackoffMs ?? DEFAULT_FAILOVER_BACKOFF_MS;
   }
 
   private findAdapter(id: string): BackendAdapter | undefined {
@@ -478,27 +626,196 @@ export class Router {
     return { backend, model };
   }
 
-  private async complete(request: ChatRequest, signal: AbortSignal): Promise<Response> {
-    const selector = modelSelector(request.model).auto ? this.primaryModel : request.model;
-    const route = await this.resolveExplicit(selector, signal);
-    if (route instanceof Response) return route;
-    const required = requiredCapabilities(request);
-    if (!supportsCapabilities(route.model, required)) {
-      return structuredError(
-        `Model ${route.model.id} does not support required capabilities: ${required.join(", ")}`,
-        422,
-        "unsupported_capability",
+  /**
+   * Ordered failover selectors. Explicit `modelChain` wins; otherwise derive
+   * from the allowed roster (or discovered models), OpenCode-first, then Kilo.
+   */
+  private async chainSelectors(signal: AbortSignal): Promise<string[]> {
+    if (this.modelChain) {
+      return this.modelChain.filter(
+        (selector) => !this.allowedModels || this.allowedModels.has(selector),
       );
     }
-    const limitError = outputLimitError(request, route.model);
-    if (limitError) return limitError;
-    if (signal.aborted) throw abortError(signal);
-    const completion = route.backend.complete({ ...request, model: route.model.id }, route.model, signal);
-    // An adapter may ignore cancellation and return a body after the caller has left.
-    void completion.then((response) => {
-      if (signal.aborted) void response.body?.cancel().catch(() => undefined);
-    }, () => undefined);
-    return raceWithSignal(completion, signal);
+    if (this.allowedModels) return opencodeFirst([...this.allowedModels]);
+    const models = await this.models(signal);
+    return opencodeFirst(models.map(modelSelectorId));
+  }
+
+  /** Resolve chain selectors to healthy routes, skipping anything unusable. */
+  private async resolveChain(signal: AbortSignal): Promise<Route[]> {
+    const selectors = await this.chainSelectors(signal);
+    const routes: Route[] = [];
+    const seen = new Set<string>();
+    for (const selector of selectors) {
+      if (seen.has(selector)) continue;
+      seen.add(selector);
+      const route = await this.resolveExplicit(selector, signal);
+      if (route instanceof Response) continue;
+      routes.push(route);
+    }
+    return routes;
+  }
+
+  private async failoverBackoff(signal: AbortSignal): Promise<void> {
+    const base = this.failoverBackoffMs;
+    if (!(base > 0)) return;
+    const delay = base + Math.random() * Math.min(500, base);
+    await new Promise<void>((resolve, reject) => {
+      if (signal.aborted) {
+        reject(abortError(signal));
+        return;
+      }
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, delay);
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(abortError(signal));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  /**
+   * Walk the chain until one model returns a real answer.
+   * Retryable: network errors, upstream (non-client) timeouts, 429, 5xx, and
+   * HTTP 200 with empty/no text content. Never fails over after response bytes
+   * have been emitted to the client. All attempts share the caller's remaining
+   * deadline via `signal`.
+   */
+  private async completeWithFailover(request: ChatRequest, attempts: Route[], signal: AbortSignal): Promise<Response> {
+    const failures: AttemptFailure[] = [];
+    const required = requiredCapabilities(request);
+    const streaming = request.stream === true;
+
+    for (const route of attempts) {
+      const selector = modelSelectorId(route.model);
+      if (signal.aborted) throw abortError(signal);
+      if (!supportsCapabilities(route.model, required)) {
+        return structuredError(
+          `Model ${route.model.id} does not support required capabilities: ${required.join(", ")}`,
+          422,
+          "unsupported_capability",
+        );
+      }
+      const limitError = outputLimitError(request, route.model);
+      if (limitError) return limitError;
+
+      let response: Response;
+      try {
+        const completion = route.backend.complete({ ...request, model: route.model.id }, route.model, signal);
+        // An adapter may ignore cancellation and return a body after the caller has left.
+        void completion.then((candidate) => {
+          if (signal.aborted) void candidate.body?.cancel().catch(() => undefined);
+        }, () => undefined);
+        response = await raceWithSignal(completion, signal);
+      } catch (error) {
+        // Client cancellation and the overall deadline are never retried.
+        if (isAbort(error)) throw error;
+        const status = statusFrom(error);
+        if (status === 429) {
+          failures.push({ model: selector, status, reason: retryableStatusReason(error, status, "rate limited") });
+          await this.failoverBackoff(signal);
+          continue;
+        }
+        if (status !== undefined && status >= 500) {
+          failures.push({ model: selector, status, reason: retryableStatusReason(error, status, "upstream error") });
+          continue;
+        }
+        if (status !== undefined) {
+          // Other 4xx are not retryable: pass the upstream refusal through.
+          const passthrough = responseFromStatusError(error);
+          if (passthrough) return withModelHeader(passthrough, selector);
+          throw error;
+        }
+        failures.push({ model: selector, reason: sanitizeReason(error, "network error") });
+        continue;
+      }
+
+      const status = response.status;
+      if (status === 429) {
+        failures.push({
+          model: selector,
+          status,
+          reason: upstreamReason(status, response.statusText || undefined, await response.text().catch(() => "")),
+        });
+        void response.body?.cancel().catch(() => undefined);
+        await this.failoverBackoff(signal);
+        continue;
+      }
+      if (status >= 500) {
+        failures.push({
+          model: selector,
+          status,
+          reason: upstreamReason(status, response.statusText || undefined, await response.text().catch(() => "")),
+        });
+        void response.body?.cancel().catch(() => undefined);
+        continue;
+      }
+      if (status >= 400) {
+        return withModelHeader(response, selector);
+      }
+
+      // 2xx: guard against the empty-content quirk on non-stream JSON bodies.
+      // Streaming responses relay bytes as they arrive, so once the first byte
+      // is handed to the client there is no failing over.
+      if (!streaming && isJsonResponse(response)) {
+        let text: string;
+        try {
+          text = await response.text();
+        } catch (error) {
+          if (isAbort(error)) throw error;
+          // A mid-body upstream failure is handed to the client as-is rather
+          // than failed over, preserving the upstream's error surface.
+          return withModelHeader(failedBodyResponse(response, error), selector);
+        }
+        let payload: unknown;
+        let parseable = true;
+        try {
+          payload = JSON.parse(text);
+        } catch {
+          parseable = false;
+        }
+        if (!parseable) {
+          failures.push({ model: selector, reason: "upstream returned 200 with an invalid JSON body" });
+          continue;
+        }
+        const content = chatCompletionHasContent(payload);
+        if (content === false) {
+          failures.push({ model: selector, reason: "upstream returned 200 with empty content" });
+          continue;
+        }
+        const headers = new Headers(response.headers);
+        headers.set(ANSWERED_MODEL_HEADER, selector);
+        return new Response(text, { status: response.status, statusText: response.statusText, headers });
+      }
+      return withModelHeader(response, selector);
+    }
+    return allModelsFailedResponse(failures);
+  }
+
+  private async complete(request: ChatRequest, signal: AbortSignal): Promise<Response> {
+    const parsed = modelSelector(request.model);
+    if (!parsed.auto && (!parsed.backendId || !parsed.id)) {
+      return structuredError("Model must use auto or backend/model syntax", 400, "invalid_model");
+    }
+    if (parsed.auto) {
+      const chain = await this.resolveChain(signal);
+      if (chain.length === 0) {
+        // No usable chain: resolve the primary for a precise 404/503.
+        const route = await this.resolveExplicit(this.primaryModel, signal);
+        if (route instanceof Response) return route;
+        return this.completeWithFailover(request, [route], signal);
+      }
+      return this.completeWithFailover(request, chain, signal);
+    }
+    const selector = request.model.trim();
+    const route = await this.resolveExplicit(selector, signal);
+    if (route instanceof Response) return route;
+    const first = modelSelectorId(route.model);
+    const rest = (await this.resolveChain(signal)).filter((candidate) => modelSelectorId(candidate.model) !== first);
+    return this.completeWithFailover(request, [route, ...rest], signal);
   }
 
   async handle(request: Request): Promise<Response> {

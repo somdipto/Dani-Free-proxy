@@ -2,7 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { createRouterServer, defaultAdapters, KILO_FREE_MODELS, OPENCODE_FREE_MODELS } from "../src/server";
 import type { BackendAdapter, BackendId, BackendModel, ChatRequest } from "../src/types";
 
-const primaryId = KILO_FREE_MODELS[0].slice("kilo/".length);
+const primaryId = OPENCODE_FREE_MODELS[0];
+const kiloId = KILO_FREE_MODELS[0].slice("kilo/".length);
 const coding = ["text", "tools", "reasoning"] as const;
 
 function model(
@@ -35,7 +36,7 @@ describe("Dani-Free standard server", () => {
     expect(defaultAdapters().map((item) => item.id)).toEqual(["opencode", "kilo"]);
   });
 
-  it("lists OpenCode free ids before three Kilo ids and pins auto to Nex Pro", async () => {
+  it("lists OpenCode free ids before three Kilo ids and pins auto to OpenCode nemotron", async () => {
     const calls: string[] = [];
     const kiloModels = KILO_FREE_MODELS.map((id) => model("kilo", id.slice("kilo/".length)));
     const server = createRouterServer({
@@ -60,7 +61,7 @@ describe("Dani-Free standard server", () => {
       expect((await fetch(`${base}/v1/chat/completions`, chat(KILO_FREE_MODELS[0]))).status).toBe(200);
       expect((await fetch(`${base}/v1/chat/completions`, chat("kilo/other"))).status).toBe(404);
       expect((await fetch(`${base}/v1/chat/completions`, chat("opencode/ling-3.0-flash-fin-free"))).status).toBe(404);
-      expect(calls).toEqual([primaryId, primaryId]);
+      expect(calls).toEqual([primaryId, kiloId]);
     } finally {
       server.close(true);
     }

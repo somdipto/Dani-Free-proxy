@@ -17,10 +17,10 @@ export interface RouterServer {
   readonly port: number;
 }
 
-/** OpenCode free ids occupy slots 1-3. `auto` is Kilo Nex Pro. */
+/** OpenCode free ids occupy slots 1-3. `auto` is OpenCode nemotron-3-ultra-free. */
 export const OPENCODE_FREE_MODELS = [
+  "opencode/nemotron-3-ultra-free",
   "opencode/muse-spark-1.3-contributor-free",
-  "opencode/muse-spark-1.2-contributor-free",
   "opencode/mimo-v2.5-free",
 ] as const;
 
@@ -36,7 +36,7 @@ export function defaultAdapters(): BackendAdapter[] {
 }
 
 export function createRouterServer(options: ServerOptions = {}): RouterServer {
-  const primaryModel = options.primaryModel ?? KILO_FREE_MODELS[0];
+  const primaryModel = options.primaryModel ?? OPENCODE_FREE_MODELS[0];
   const allowedModels = options.allowedModels ?? [...OPENCODE_FREE_MODELS, ...KILO_FREE_MODELS];
   const router = createRouter({
     ...options,
