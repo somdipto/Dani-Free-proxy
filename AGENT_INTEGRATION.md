@@ -269,7 +269,7 @@ An agent integrating Dani-Free should follow this sequence:
 2. `GET /health`.
 3. `GET /v1/models`.
 4. Filter models by requested capability, if the client uses capabilities.
-5. Select `auto` or `kilo/nex-agi/nex-n2.5-pro:free`.
+5. Select `auto` or one of the OpenCode/Kilo free ids listed by `/v1/models`.
 6. Send a minimal non-streaming request first.
 7. Enable streaming only if the selected backend/client path is known to support it.
 8. Preserve backend error status and message in diagnostics, after redaction.
@@ -282,13 +282,13 @@ An agent integrating Dani-Free should follow this sequence:
 | Result | Meaning | Action |
 |---|---|---|
 | `401` | Dani-Free client key is missing or invalid | Send the configured bearer key |
-| `403` | Upstream credential rejected | Check backend credentials |
+| `403` | Upstream credential rejected (passed through as-is) | Check backend credentials |
 | `404` | Wrong Dani-Free route, explicit backend, or model selector | Check the exact selector; do not fall back |
-| `429` | Upstream throttling | Return the error; do not switch models |
-| `5xx` | Backend failure with its upstream status preserved | Return the error; do not switch models |
+| `429` | Upstream throttling. On `auto` the router pauses briefly and fails over to the next model; on an explicit selector the refusal is returned as-is | Retry with backoff; if the model stays throttled, switch selectors or wait |
+| `5xx` | Backend failure. On `auto` the router fails over to the next model (429/408/5xx only); on an explicit selector, or once every model in the chain has failed, the refusal is returned as-is | Check backend health; on repeated failures use a different selector or wait |
 | `502 backend_network_error` | Router could not complete the upstream request | Inspect backend health and endpoint |
-| `503` | Pinned model missing, unhealthy, or backend unavailable | Fix Kilo configuration or wait; do not switch models |
-| `504 timeout` | Discovery or the request reached its deadline | Check Kilo, request cancellation, and the router timeout |
+| `503 all_models_failed` | Every model in the failover chain failed; the body lists per-attempt reasons | Read the per-attempt reasons, then fix the backend configuration or wait |
+| `504 timeout` | Discovery or the request reached its deadline | Check request size/cancellation and the router timeout |
 | empty `/v1/models` | Discovery failed or no backend is configured | Check `/health` and credentials |
 
 ## 12. Security rules
