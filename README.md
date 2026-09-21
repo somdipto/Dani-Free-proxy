@@ -23,7 +23,7 @@ The default listener is `http://127.0.0.1:4190`. Override it with `DANI_FREE_HOS
 
 ## Speed, failover, and cancellation behavior
 
-The router keeps a five-second model-discovery cache. The request deadline starts when the request is received, includes discovery, and stays active through streamed response EOF. On failure the router walks the OpenCode-first chain: an explicit selector is tried first, then the remaining models. Client cancellation is terminal, and once streamed bytes have been emitted to the client there is no failing over. A 4xx from an upstream is passed through to the caller rather than retried.
+The router keeps a five-second model-discovery cache. The request deadline starts when the request is received, includes discovery, and stays active through streamed response EOF. On failure the router walks the OpenCode-first chain: an explicit selector is tried first, then the remaining models. Client cancellation is terminal, and once streamed bytes have been emitted to the client there is no failing over. Any other 4xx refusal from an upstream is passed through to the caller rather than retried (408 and 429 fail over, as above).
 
 ## Configuration
 
