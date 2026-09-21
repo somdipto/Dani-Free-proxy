@@ -508,7 +508,13 @@ function responseWithDeadline(response: Response, scope: CombinedSignal): Respon
         }
       } catch (error) {
         if (settled) return;
-        finishSse(controller);
+        if (!scope.signal.aborted) {
+          // Genuine upstream stream failure (not a caller/deadline abort):
+          // preserve the original error instead of replacing it with an abort error.
+          try { controller.error(error); } catch { /* already closed */ }
+        } else {
+          finishSse(controller);
+        }
         dispose();
       } finally {
         clearTimeout(timer);
