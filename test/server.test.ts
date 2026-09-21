@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { KiloAdapter } from "../src/adapters/kilo";
 import { createRouterServer, defaultAdapters, KILO_FREE_MODELS, OPENCODE_FREE_MODELS } from "../src/server";
 import type { BackendAdapter, BackendId, BackendModel, ChatRequest } from "../src/types";
 
@@ -34,6 +35,27 @@ function chat(model = "auto", extra: Partial<ChatRequest> = {}): RequestInit {
 describe("Dani-Free standard server", () => {
   it("defaults to OpenCode then Kilo", () => {
     expect(defaultAdapters().map((item) => item.id)).toEqual(["opencode", "kilo"]);
+  });
+
+  it("constructs fresh adapters after env is bridged so JSON-config backends take effect", () => {
+    // Adapters read backend settings from the environment at construction
+    // time. The CLI bridges JSON-config values into the environment after
+    // modules are imported but before the server is created, so adapters
+    // built as import-time singletons would silently miss those values.
+    const kiloUrl = "https://kilo-test.example/v1";
+    const prev = process.env.DANI_FREE_KILO_BASE_URL;
+    process.env.DANI_FREE_KILO_BASE_URL = kiloUrl;
+    try {
+      const kilo = defaultAdapters().find((item) => item.id === "kilo") as KiloAdapter | undefined;
+      expect(kilo).toBeDefined();
+      expect(kilo?.baseUrl).toBe(kiloUrl);
+      // Fresh instances on every call: the old import-time singleton would be identical.
+      const kiloAgain = defaultAdapters().find((item) => item.id === "kilo");
+      expect(kiloAgain).not.toBe(kilo);
+    } finally {
+      if (prev === undefined) delete process.env.DANI_FREE_KILO_BASE_URL;
+      else process.env.DANI_FREE_KILO_BASE_URL = prev;
+    }
   });
 
   it("lists OpenCode free ids before three Kilo ids and pins auto to OpenCode nemotron", async () => {

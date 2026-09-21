@@ -1,5 +1,5 @@
-import kiloAdapter from "./adapters/kilo";
-import openCodeAdapter from "./adapters/opencode";
+import { KiloAdapter } from "./adapters/kilo";
+import { OpenCodeAdapter } from "./adapters/opencode";
 import { createRouter, type RouterOptions } from "./router";
 import type { BackendAdapter } from "./types";
 
@@ -32,7 +32,11 @@ export const KILO_FREE_MODELS = [
 ] as const;
 
 export function defaultAdapters(): BackendAdapter[] {
-  return [openCodeAdapter, kiloAdapter];
+  // Fresh instances per server, not import-time singletons: the CLI bridges
+  // JSON-config backend settings into the environment (applyBackendEnvironment)
+  // after modules are imported but before the server is created, so adapters
+  // must read the environment at construction time to see those values.
+  return [new OpenCodeAdapter(), new KiloAdapter()];
 }
 
 export function createRouterServer(options: ServerOptions = {}): RouterServer {
