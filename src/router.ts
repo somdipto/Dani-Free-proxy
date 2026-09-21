@@ -891,9 +891,9 @@ export class Router {
         }
         if (status !== undefined) {
           // Other 4xx are not retryable: pass the upstream refusal through.
-          const passthrough = responseFromStatusError(error);
-          if (passthrough) return withModelHeader(passthrough, selector);
-          throw error;
+          // responseFromStatusError always builds a Response in this branch:
+          // statusFrom already found a status on this error above.
+          return withModelHeader(responseFromStatusError(error)!, selector);
         }
         failures.push({ model: selector, reason: sanitizeReason(error, "network error") });
         continue;
