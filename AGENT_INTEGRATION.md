@@ -4,7 +4,7 @@ This is the canonical guide for an AI coding agent, developer, or integration au
 
 ## 1. What Dani-Free is
 
-Dani-Free is a local OpenAI-compatible model router. The standard listener lists three OpenCode free ids, then three Kilo free ids, and pins `auto` to `opencode/muse-spark-1.3-contributor-free`. It does not retry another model on quota, timeout, or upstream failure.
+Dani-Free is a local OpenAI-compatible model router. Its standard preference order is three OpenCode ids, then three Kilo ids. `auto` resolves only to `opencode/muse-spark-1.3-contributor-free`. `/v1/models` includes only exact ids discovered from configured backends, in that order. It does not retry another model on quota, timeout, or upstream failure.
 
 ```text
 Dani-Free standard route:
@@ -118,7 +118,7 @@ bun install
 bun run start
 ```
 
-The installer adds `dani-free` to `~/.local/bin` and copies the operational skill into the OMP and OpenCode skill directories for documentation and invocation convenience. That installation does not install or authenticate backend services, does not add OpenCode to the automatic pool, and does not implement OpenCode ACP.
+The installer adds `dani-free` to `~/.local/bin` and copies the operational skill into the OMP and OpenCode skill directories for documentation and invocation convenience. That installation does not install or authenticate backend services, prove OpenCode free-tier authorization, or implement OpenCode ACP.
 
 Useful commands:
 
@@ -146,7 +146,7 @@ DANI_FREE_HOST=127.0.0.1
 DANI_FREE_PORT=4190
 DANI_FREE_API_KEY=<client-key>
 
-DANI_FREE_OPENCODE_BASE_URL=<verified-endpoint-if-explicitly-using-legacy-compatibility>
+DANI_FREE_OPENCODE_BASE_URL=<provider-authorized-openai-chat-completions-endpoint>
 DANI_FREE_OPENCODE_API_KEY=<optional>
 
 DANI_FREE_KILO_BASE_URL=https://api.kilo.ai/api/gateway
@@ -159,7 +159,7 @@ DANI_FREE_MIMO_PROTOCOL=opencode
 DANI_FREE_MIMO_SERVE_PORT=4191
 ```
 
-The standard listener uses the OpenCode HTTP adapter plus Kilo. MiMo environment variables do not enroll extra models in `auto`.
+The standard listener constructs OpenCode and Kilo adapters from the resolved configuration. MiMo environment variables do not enroll extra models in `auto`.
 
 ## 6. Backend-specific setup
 
@@ -169,11 +169,11 @@ Kilo ids use Kilo's gateway. Configure `DANI_FREE_KILO_API_KEY` before starting 
 
 ### OpenCode
 
-OpenCode ids go through the local `:4187` proxy. Dani-Free does not implement OpenCode ACP.
+OpenCode ids require an explicitly configured, provider-authorized OpenAI Chat Completions-compatible endpoint. Dani-Free does not implement OpenCode ACP, start `opencode serve`, or transform an OpenCode agent session into a completion proxy. Configuration alone does not establish free-tier entitlement or guarantee that every requested id is currently offered.
 
-## 7. Optional legacy OpenCode client configuration
+## 7. Optional OpenCode client configuration
 
-The following fragment configures an OpenCode client to call Dani-Free as an OpenAI-compatible provider. It is not an OpenCode ACP bridge and does not enable the legacy OpenCode adapter in Dani-Free's automatic pool.
+The following fragment configures an OpenCode client to call Dani-Free as an OpenAI-compatible provider. It is not an OpenCode ACP bridge and does not prove OpenCode free-tier availability through Dani-Free.
 
 Merge this into the user's existing OpenCode config. Preserve existing providers and append `dani-free` to `enabled_providers`; do not replace the whole array blindly.
 
@@ -206,7 +206,7 @@ Copy the provider block from `integrations/omp-models.yml` into `~/.omp/agent/mo
 dani-free/auto
 ```
 
-OMP must be able to reach the router before selecting the model. `auto` is the pinned Kilo model. Verify with:
+OMP must be able to reach the router before selecting the model. `auto` targets OpenCode slot 1 and can fail closed when that exact model is absent, unsupported, unavailable, or unauthorized. Verify with:
 
 ```sh
 omp models find dani-free --json
@@ -269,7 +269,7 @@ An agent integrating Dani-Free should follow this sequence:
 2. `GET /health`.
 3. `GET /v1/models`.
 4. Filter models by requested capability, if the client uses capabilities.
-5. Select `auto` or `kilo/nex-agi/nex-n2.5-pro:free`.
+5. Select an exact discovered id, or use `auto` only when OpenCode slot 1 is configured and discovered.
 6. Send a minimal non-streaming request first.
 7. Enable streaming only if the selected backend/client path is known to support it.
 8. Preserve backend error status and message in diagnostics, after redaction.
@@ -287,8 +287,8 @@ An agent integrating Dani-Free should follow this sequence:
 | `429` | Upstream throttling | Return the error; do not switch models |
 | `5xx` | Backend failure with its upstream status preserved | Return the error; do not switch models |
 | `502 backend_network_error` | Router could not complete the upstream request | Inspect backend health and endpoint |
-| `503` | Pinned model missing, unhealthy, or backend unavailable | Fix Kilo configuration or wait; do not switch models |
-| `504 timeout` | Discovery or the request reached its deadline | Check Kilo, request cancellation, and the router timeout |
+| `503` | Selected model is unhealthy or its backend is unavailable | Fix that backend configuration or wait; do not switch models |
+| `504 timeout` | Discovery or the request reached its deadline | Check the selected backend, request cancellation, and the router timeout |
 | empty `/v1/models` | Discovery failed or no backend is configured | Check `/health` and credentials |
 
 ## 12. Security rules

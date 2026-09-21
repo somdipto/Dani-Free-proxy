@@ -17,16 +17,16 @@ The default listener is `127.0.0.1:4190`. Set `DANI_FREE_HOST` and `DANI_FREE_PO
 ## Model selectors and routing
 
 - `auto` selects `opencode/muse-spark-1.3-contributor-free`. The router does not retry another model.
-- Standard listener ids: three OpenCode free models, then three Kilo free models.
+- Standard listener order is three OpenCode ids, then three Kilo ids, but only exact discovered ids are advertised.
 - Other `kilo/<id>`, `mimo/<id>`, and `opencode/<id>` values are rejected unless a custom adapter set was supplied.
 - Use an exact model id returned by `/v1/models`. Explicit selectors fail closed.
-- Advertised models include `tools` and `reasoning` so OMP coding requests do not 422.
+- Capabilities come from backend discovery. A request requiring an unadvertised capability is rejected rather than silently flattened.
 
 The API is OpenAI-compatible at `/v1/models` and `/v1/chat/completions`. Client cancellation is propagated and terminal.
 
 ## Backend configuration
 
-Kilo Code requires its configured gateway and API key when required by the endpoint. OpenCode ids require the local `:4187` proxy.
+Kilo Code requires its configured gateway and API key when required by the endpoint. OpenCode ids require an explicitly configured, provider-authorized OpenAI Chat Completions-compatible endpoint. Dani-Free does not start OpenCode ACP or an agent-session bridge.
 
 See:
 
@@ -44,4 +44,4 @@ See:
 
 ## Current limitation
 
-Free-tier availability can change. If Kilo returns 429/503/timeout, Dani-Free reports that failure and does not switch models.
+Public OpenCode guidance does not establish authorized direct free-tier completion access for all requested ids. Configuration cannot supply that authorization. If the selected OpenCode or Kilo backend returns 401, 403, 429, 503, or a timeout, Dani-Free reports that failure and does not switch models.

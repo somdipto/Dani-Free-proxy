@@ -6,7 +6,6 @@ import type {
   ChatRequest,
 } from "../types.ts";
 
-const DEFAULT_BASE_URL = "http://127.0.0.1:4187/v1";
 const BACKEND = "opencode" as const;
 
 type UnknownRecord = Record<string, unknown>;
@@ -41,18 +40,16 @@ function stringSet(value: unknown): Set<string> {
   return new Set(value.filter((item): item is string => typeof item === "string").map((item) => item.toLowerCase()));
 }
 
-/**
- * OMP always sends tools + reasoning. Catalogue metadata is incomplete, so
- * advertise them; the 4187 proxy still flattens tool calls.
- */
 function modelCapabilities(record: UnknownRecord): Capability[] {
-  const capabilities: Capability[] = ["text", "tools", "reasoning"];
+  const capabilities: Capability[] = ["text"];
   const advertised = new Set([
     ...stringSet(record.capabilities),
     ...stringSet(record.modalities),
     ...stringSet(record.input_modalities),
     ...stringSet(record.inputModalities),
   ]);
+  if (advertised.has("tools") || advertised.has("tool") || advertised.has("function_calling")) capabilities.push("tools");
+  if (advertised.has("reasoning")) capabilities.push("reasoning");
   const supportsImages =
     record.supports_images === true ||
     record.supportsImages === true ||
@@ -100,16 +97,20 @@ export class OpenCodeAdapter implements BackendAdapter {
   private readonly apiKey: string | undefined;
 
   constructor(options?: { baseUrl?: string; apiKey?: string }) {
-    const configuredBase = options?.baseUrl ?? process.env.DANI_FREE_OPENCODE_BASE_URL ?? DEFAULT_BASE_URL;
-    try {
-      const parsed = new URL(configuredBase.trim());
-      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("unsupported URL scheme");
-      parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
-      parsed.search = "";
-      parsed.hash = "";
-      this.baseUrl = parsed;
-    } catch {
+    const configuredBase = options?.baseUrl ?? process.env.DANI_FREE_OPENCODE_BASE_URL;
+    if (!configuredBase) {
       this.baseUrl = null;
+    } else {
+      try {
+        const parsed = new URL(configuredBase.trim());
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("unsupported URL scheme");
+        parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
+        parsed.search = "";
+        parsed.hash = "";
+        this.baseUrl = parsed;
+      } catch {
+        this.baseUrl = null;
+      }
     }
 
     const configuredKey = options?.apiKey ?? process.env.DANI_FREE_OPENCODE_API_KEY;
@@ -257,6 +258,3 @@ export class OpenCodeAdapter implements BackendAdapter {
     });
   }
 }
-
-export const openCodeAdapter = new OpenCodeAdapter();
-export default openCodeAdapter;

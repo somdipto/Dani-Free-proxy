@@ -1,13 +1,12 @@
 # Dani-Free
 
-Dani-Free is a small Bun/TypeScript local OpenAI-compatible router. The standard listener advertises three OpenCode free ids, then three Kilo free ids. `auto` is `opencode/muse-spark-1.3-contributor-free`. If the selected model is missing, unhealthy, quota-exhausted, timed out, or otherwise failed, the router returns that error and does not switch models. Free-tier availability is promotional and can change; `:free` in an id is not a billing or privacy guarantee.
+Dani-Free is a small Bun/TypeScript local OpenAI-compatible router. Its standard preference order is three OpenCode ids, then three Kilo ids. `auto` resolves only to `opencode/muse-spark-1.3-contributor-free`. `/v1/models` lists only exact ids discovered from configured backends, in that preference order. A missing, unhealthy, quota-exhausted, timed-out, or otherwise failed model returns its own error and never switches backend.
 
 ## Requirements
 
 - Bun 1.1 or newer.
-- A configured Kilo Code gateway credential (`DANI_FREE_KILO_API_KEY`) for the Kilo ids.
-- The local OpenCode proxy on `127.0.0.1:4187` for the OpenCode ids.
-
+- A configured Kilo Code gateway credential (`DANI_FREE_KILO_API_KEY`) for Kilo slots 4–6.
+- Written provider authorization and a direct OpenAI Chat Completions-compatible endpoint for any OpenCode slot. The current public OpenCode material does not establish this for all three requested free IDs. See [`docs/research/opencode-free-access-2026-09-21.md`](docs/research/opencode-free-access-2026-09-21.md).
 ## Setup
 
 ```sh
@@ -32,6 +31,8 @@ The router keeps a five-second model-discovery cache. The request deadline start
 | `DANI_FREE_HOST` | Bind address; defaults to `127.0.0.1`. |
 | `DANI_FREE_PORT` | Listen port; defaults to `4190`. |
 | `DANI_FREE_API_KEY` | Optional client API key. When set, clients must send `Authorization: Bearer <value>`. |
+| `DANI_FREE_OPENCODE_BASE_URL` | Explicit, provider-authorized OpenAI Chat Completions-compatible endpoint for OpenCode. Unset by default. |
+| `DANI_FREE_OPENCODE_API_KEY` | Credential for that endpoint, if required. |
 | `DANI_FREE_KILO_BASE_URL` | Verified Kilo Code endpoint. Defaults to `https://api.kilo.ai/api/gateway`. |
 | `DANI_FREE_KILO_API_KEY` | Kilo Code endpoint credential, if required. |
 
@@ -69,10 +70,10 @@ If `DANI_FREE_API_KEY` is unset, omit the authorization header. The deterministi
 
 ## OpenCode boundary
 
-Dani-Free is an OpenAI-compatible inference proxy for the pinned Kilo model. It does not implement OpenCode ACP, own OpenCode's agent loop, or expose OpenCode free models through this listener. Do not send OpenCode traffic to Dani-Free and expect a silent substitute.
+Dani-Free has no default OpenCode endpoint and does not start OpenCode ACP or an OpenCode agent/session bridge. Configuring `DANI_FREE_OPENCODE_BASE_URL` only selects an HTTP transport; it does not establish entitlement, free-tier authorization, model availability, or tool support. The configured endpoint must advertise each exact model and its capabilities. Missing requested ids stay absent from `/v1/models`; `auto` then fails closed rather than selecting Kilo.
 
 ## Security
 
-The canonical implementation guide for AI agents and custom model-provider clients is [`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md). It documents the protocol contract, the pinned Kilo selector, setup, OMP, Python, JavaScript, security, failure handling, and an integration checklist.
+The canonical implementation guide for AI agents and custom model-provider clients is [`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md). It documents the protocol contract, configured backends, OMP, Python, JavaScript, security, failure handling, and an integration checklist.
 
 The shorter provider templates remain in [`integrations/`](integrations/), and the operational skill is in [`skills/dani-free/SKILL.md`](skills/dani-free/SKILL.md).

@@ -1,5 +1,5 @@
-import kiloAdapter from "./adapters/kilo";
-import openCodeAdapter from "./adapters/opencode";
+import { KiloAdapter } from "./adapters/kilo";
+import { OpenCodeAdapter } from "./adapters/opencode";
 import { createRouter, type RouterOptions } from "./router";
 import type { BackendAdapter } from "./types";
 
@@ -17,7 +17,7 @@ export interface RouterServer {
   readonly port: number;
 }
 
-/** OpenCode free ids occupy slots 1-3. `auto` is Kilo Nex Pro. */
+/** OpenCode free ids occupy slots 1-3. `auto` is Muse Spark 1.3. */
 export const OPENCODE_FREE_MODELS = [
   "opencode/muse-spark-1.3-contributor-free",
   "opencode/muse-spark-1.2-contributor-free",
@@ -32,11 +32,11 @@ export const KILO_FREE_MODELS = [
 ] as const;
 
 export function defaultAdapters(): BackendAdapter[] {
-  return [openCodeAdapter, kiloAdapter];
+  return [new OpenCodeAdapter(), new KiloAdapter()];
 }
 
 export function createRouterServer(options: ServerOptions = {}): RouterServer {
-  const primaryModel = options.primaryModel ?? KILO_FREE_MODELS[0];
+  const primaryModel = options.primaryModel ?? OPENCODE_FREE_MODELS[0];
   const allowedModels = options.allowedModels ?? [...OPENCODE_FREE_MODELS, ...KILO_FREE_MODELS];
   const router = createRouter({
     ...options,

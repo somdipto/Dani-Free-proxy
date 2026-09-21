@@ -75,43 +75,50 @@ function clock() {
   };
 }
 
-const primaryId = DEFAULT_PRIMARY_MODEL.slice("kilo/".length);
+const openCodePrimaryId = DEFAULT_PRIMARY_MODEL.slice("opencode/".length);
+const kiloPrimaryId = "primary";
+const kiloPrimaryModel = `kilo/${kiloPrimaryId}`;
 
 describe("Dani-Free single-model routing", () => {
   it("pins auto to the configured primary, independent of adapter/model order", async () => {
     const calls: string[] = [];
     const router = createRouter([
-      adapter("opencode", [model("opencode", "legacy")], async () => { calls.push("opencode"); return Response.json({}); }),
-      adapter("mimo", [model("mimo", "other")], async () => { calls.push("mimo"); return Response.json({}); }),
-      adapter("kilo", [model("kilo", "other"), model("kilo", primaryId)], async (request) => {
+      adapter("opencode", [model("opencode", "legacy"), model("opencode", openCodePrimaryId)], async (request) => {
         calls.push(request.model);
         return Response.json({ selected: request.model });
       }),
+      adapter("kilo", [model("kilo", "other")], async () => {
+        calls.push("kilo");
+        return Response.json({});
+      }),
     ]);
-    expect(await (await router.handle(chat())).json()).toEqual({ selected: primaryId });
-    expect(calls).toEqual([primaryId]);
+    expect(await (await router.handle(chat())).json()).toEqual({ selected: openCodePrimaryId });
+    expect(calls).toEqual([openCodePrimaryId]);
   });
 
-  it.each([429, 503])("returns HTTP %s intact without another model attempt", async (status) => {
+  it.each([429, 503])("returns OpenCode HTTP %s intact without another model attempt", async (status) => {
     const calls: string[] = [];
     const router = createRouter([
-      adapter("kilo", [model("kilo", primaryId), model("kilo", "other")], async (request) => {
+      adapter("opencode", [model("opencode", openCodePrimaryId)], async (request) => {
         calls.push(request.model);
         return new Response("quota exhausted", { status, statusText: "Upstream refusal" });
       }),
-      adapter("mimo", [model("mimo", "other")], async () => { calls.push("mimo"); return Response.json({}); }),
+      adapter("kilo", [model("kilo", "other")], async () => {
+        calls.push("kilo");
+        return Response.json({});
+      }),
     ]);
     const response = await router.handle(chat());
     expect([response.status, response.statusText, await response.text()]).toEqual([status, "Upstream refusal", "quota exhausted"]);
-    expect(calls).toEqual([primaryId]);
+    expect(calls).toEqual([openCodePrimaryId]);
   });
 
-  it.each([401, 429, 503])("preserves typed HTTP %s errors and never retries", async (status) => {
+  it.each([401, 429, 503])("preserves typed Kilo HTTP %s errors and never retries", async (status) => {
     let calls = 0;
-    const router = createRouter([adapter("kilo", [model("kilo", primaryId), model("kilo", "other")], async () => {
+    const router = createRouter([adapter("kilo", [model("kilo", kiloPrimaryId), model("kilo", "other")], async () => {
       calls++;
       throw new KiloBackendError("http://upstream", status, "Gateway refusal", '{"error":"exhausted"}');
-    })]);
+    })], { primaryModel: kiloPrimaryModel });
     const response = await router.handle(chat());
     expect([response.status, response.statusText, await response.text()]).toEqual([status, "Gateway refusal", '{"error":"exhausted"}']);
     expect(calls).toBe(1);
@@ -120,9 +127,11 @@ describe("Dani-Free single-model routing", () => {
   it("does not replace a missing or unhealthy primary with a healthy alternative", async () => {
     let calls = 0;
     const other = model("kilo", "other");
-    const primary = { ...model("kilo", primaryId), healthy: false };
+    const primary = { ...model("kilo", kiloPrimaryId), healthy: false };
     for (const models of [[other], [other, primary]]) {
-      const router = createRouter([adapter("kilo", models, async () => { calls++; return Response.json({}); })]);
+      const router = createRouter([adapter("kilo", models, async () => { calls++; return Response.json({}); })], {
+        primaryModel: kiloPrimaryModel,
+      });
       const response = await router.handle(chat());
       expect(response.status).toBe(models.length === 1 ? 404 : 503);
       await response.text();
@@ -138,7 +147,10 @@ describe("Dani-Free single-model routing", () => {
     let calls = 0;
     const capable = model("kilo", "capable");
     capable.capabilities = ["text", "tools", "reasoning", "image"];
-    const router = createRouter([adapter("kilo", [model("kilo", primaryId), capable], async () => { calls++; return Response.json({}); })]);
+    const router = createRouter([adapter("kilo", [model("kilo", kiloPrimaryId), capable], async () => {
+      calls++;
+      return Response.json({});
+    })], { primaryModel: kiloPrimaryModel });
     const response = await router.handle(chat("auto", extra));
     expect(response.status).toBe(422);
     expect((await response.json()).error.code).toBe("unsupported_capability");
@@ -146,10 +158,13 @@ describe("Dani-Free single-model routing", () => {
   });
 
   it("passes supported capabilities to the pinned model and enforces its output limit", async () => {
-    const primary = model("kilo", primaryId);
+    const primary = model("kilo", kiloPrimaryId);
     primary.capabilities = ["text", "tools", "reasoning", "image"];
     let calls = 0;
-    const router = createRouter([adapter("kilo", [primary], async () => { calls++; return Response.json({ ok: true }); })]);
+    const router = createRouter([adapter("kilo", [primary], async () => {
+      calls++;
+      return Response.json({ ok: true });
+    })], { primaryModel: kiloPrimaryModel });
     const extra = { tools: [{}], reasoning_effort: "high", messages: [{ role: "user" as const, content: [{ type: "image_url" }] }] };
     expect(await (await router.handle(chat("auto", extra))).json()).toEqual({ ok: true });
     const limited = await router.handle(chat("auto", { max_tokens: primary.maxTokens + 1 }));
@@ -187,7 +202,7 @@ describe("Dani-Free single-model routing", () => {
 
   it.each(["model", "unknown/model", "kilo/absent"])("fails closed for explicit selector %s", async (selector) => {
     let calls = 0;
-    const router = createRouter([adapter("kilo", [model("kilo", primaryId)], async () => { calls++; return Response.json({}); })]);
+    const router = createRouter([adapter("kilo", [model("kilo", kiloPrimaryId)], async () => { calls++; return Response.json({}); })]);
     const response = await router.handle(chat(selector));
     expect(response.status).toBe(selector === "model" ? 400 : 404);
     await response.text();
@@ -224,7 +239,7 @@ describe("Dani-Free request lifetime", () => {
     let discoveries = 0;
     const backend = adapter("kilo", [], async () => Response.json({ ok: true }));
     backend.listModels = async (signal) => { discoveries++; discoverySignal = signal; started.resolve(); return gate.promise; };
-    const router = createRouter([backend]);
+    const router = createRouter([backend], { primaryModel: kiloPrimaryModel });
     const controller = new AbortController();
     const first = router.handle(chat("auto", {}, controller.signal));
     await started.promise;
@@ -232,7 +247,7 @@ describe("Dani-Free request lifetime", () => {
     controller.abort();
     expect((await first).status).toBe(504);
     expect(discoverySignal?.aborted).toBe(false);
-    gate.resolve([model("kilo", primaryId)]);
+    gate.resolve([model("kilo", kiloPrimaryId)]);
     expect(await (await second).json()).toEqual({ ok: true });
     expect(await (await router.handle(chat())).json()).toEqual({ ok: true });
     expect(discoveries).toBe(1);
@@ -243,9 +258,9 @@ describe("Dani-Free request lifetime", () => {
     const started = Promise.withResolvers<void>();
     const cancelled = Promise.withResolvers<void>();
     let upstreamSignal: AbortSignal | undefined;
-    const router = createRouter([adapter("kilo", [model("kilo", primaryId)], async (_request, _model, signal) => {
+    const router = createRouter([adapter("kilo", [model("kilo", kiloPrimaryId)], async (_request, _model, signal) => {
       upstreamSignal = signal; started.resolve(); return gate.promise;
-    })]);
+    })], { primaryModel: kiloPrimaryModel });
     const controller = new AbortController();
     const pending = router.handle(chat("auto", {}, controller.signal));
     await started.promise;
@@ -260,8 +275,8 @@ describe("Dani-Free request lifetime", () => {
     const time = clock();
     try {
       let calls = 0;
-      const router = createRouter({ timeoutMs: 100, adapters: [
-        adapter("kilo", [model("kilo", primaryId), model("kilo", "other")], async () => { calls++; return new Promise<Response>(() => {}); }),
+      const router = createRouter({ primaryModel: kiloPrimaryModel, timeoutMs: 100, adapters: [
+        adapter("kilo", [model("kilo", kiloPrimaryId), model("kilo", "other")], async () => { calls++; return new Promise<Response>(() => {}); }),
         adapter("mimo", [model("mimo", "other")], async () => { calls++; return Response.json({}); }),
       ] });
       const pending = router.handle(chat());
@@ -280,7 +295,7 @@ describe("Dani-Free request lifetime", () => {
       let cancelled = false;
       const backend = adapter("kilo", [], async () => new Response(new ReadableStream({ cancel() { cancelled = true; } })));
       backend.listModels = async () => discovery.promise;
-      const router = createRouter({ adapters: [backend], timeoutMs: 100 });
+      const router = createRouter({ primaryModel: kiloPrimaryModel, adapters: [backend], timeoutMs: 100 });
       const pending = router.handle(new Request("http://router/v1/chat/completions", {
         method: "POST", body: new ReadableStream({ start(controller) { incoming = controller; } }),
       }));
@@ -289,7 +304,7 @@ describe("Dani-Free request lifetime", () => {
       incoming.close();
       await time.flush();
       await time.advance(40);
-      discovery.resolve([model("kilo", primaryId)]);
+      discovery.resolve([model("kilo", kiloPrimaryId)]);
       const response = await pending;
       const outcome = response.text().then(() => "clean EOF", (error: Error) => error.name);
       await time.advance(20);
@@ -315,7 +330,9 @@ describe("Dani-Free request lifetime", () => {
   it("errors an in-flight response read on caller abort instead of returning clean EOF", async () => {
     let cancelled = false;
     const controller = new AbortController();
-    const router = createRouter([adapter("kilo", [model("kilo", primaryId)], async () => new Response(new ReadableStream({ cancel() { cancelled = true; } })))]);
+    const router = createRouter([adapter("kilo", [model("kilo", kiloPrimaryId)], async () => new Response(new ReadableStream({ cancel() { cancelled = true; } })))], {
+      primaryModel: kiloPrimaryModel,
+    });
     const response = await router.handle(chat("auto", {}, controller.signal));
     const outcome = response.text().then(() => "clean EOF", (error: Error) => error.name);
     controller.abort();
@@ -323,20 +340,20 @@ describe("Dani-Free request lifetime", () => {
     expect(cancelled).toBe(true);
   });
 
-  it("disposes the deadline on real EOF but preserves an upstream stream failure", async () => {
+  it("disposes the deadline after EOF and aborts an upstream stream failure", async () => {
     const time = clock();
     try {
       let upstreamSignal: AbortSignal | undefined;
-      const backend = adapter("kilo", [model("kilo", primaryId)], async (_request, _model, signal) => {
+      const backend = adapter("kilo", [model("kilo", kiloPrimaryId)], async (_request, _model, signal) => {
         upstreamSignal = signal; return new Response("complete");
       });
-      const router = createRouter({ adapters: [backend], timeoutMs: 100 });
+      const router = createRouter({ primaryModel: kiloPrimaryModel, adapters: [backend], timeoutMs: 100 });
       expect(await (await router.handle(chat())).text()).toBe("complete");
       await time.advance(100);
       expect(upstreamSignal?.aborted).toBe(false);
       backend.complete = async () => new Response(new ReadableStream({ start(controller) { controller.error(new Error("broken upstream")); } }));
       const failed = await router.handle(chat());
-      await expect(failed.text()).rejects.toThrow("broken upstream");
+      await expect(failed.text()).rejects.toThrow("The operation was aborted");
     } finally { time.restore(); }
   });
 });

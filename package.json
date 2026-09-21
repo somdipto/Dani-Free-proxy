@@ -3,12 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Local OpenAI-compatible router pinned to one free Kilo Code model.",
+  "description": "Local OpenAI-compatible router with ordered OpenCode and Kilo backends.",
   "scripts": {
     "start": "bun run src/cli.ts start",
     "dev": "bun --watch src/cli.ts start",
     "check": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test test/*.test.ts"
   },
   "bin": {
     "dani-free": "src/cli.ts"

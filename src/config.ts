@@ -41,7 +41,7 @@ const DEFAULTS: DaniFreeConfig = {
   bodyLimitBytes: 4 * 1024 * 1024,
   configPath: DEFAULT_CONFIG_PATH,
   backends: {
-    opencode: { baseUrl: "http://127.0.0.1:4187/v1" },
+    opencode: {},
     kilo: { baseUrl: "https://api.kilo.ai/api/gateway" },
     mimo: {},
   },

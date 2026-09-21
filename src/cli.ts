@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import { KiloAdapter } from "./adapters/kilo";
+import { OpenCodeAdapter } from "./adapters/opencode";
 import type { DaniFreeConfig } from "./config";
 import { loadConfig } from "./config";
 import { startServer } from "./server";
@@ -168,29 +170,18 @@ async function runDoctor(config: DaniFreeConfig): Promise<number> {
   }
   return failed ? 1 : 0;
 }
-function applyBackendEnvironment(config: DaniFreeConfig): void {
-  const values = {
-    DANI_FREE_OPENCODE_BASE_URL: config.backends.opencode.baseUrl,
-    DANI_FREE_OPENCODE_API_KEY: config.backends.opencode.apiKey,
-    DANI_FREE_KILO_BASE_URL: config.backends.kilo.baseUrl,
-    DANI_FREE_KILO_API_KEY: config.backends.kilo.apiKey,
-    DANI_FREE_MIMO_BASE_URL: config.backends.mimo.baseUrl,
-    DANI_FREE_MIMO_API_KEY: config.backends.mimo.apiKey,
-    DANI_FREE_MIMO_COMMAND: config.backends.mimo.command,
-  };
-  for (const [name, value] of Object.entries(values)) {
-    if (value !== undefined) process.env[name] = value;
-  }
-}
 
 async function runStart(config: DaniFreeConfig): Promise<number> {
-  applyBackendEnvironment(config);
   const started = startServer({
     host: config.host,
     port: config.port,
     apiKey: config.apiKey,
     timeoutMs: config.requestTimeoutMs,
     maxBodyBytes: config.bodyLimitBytes,
+    adapters: [
+      new OpenCodeAdapter(config.backends.opencode),
+      new KiloAdapter(config.backends.kilo),
+    ],
   });
   console.log(`dani-free listening at ${endpoint(config)}`);
   let shuttingDown = false;

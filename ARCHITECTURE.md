@@ -26,16 +26,16 @@ The router is a **model request router**. It is not the owner of OMP's subagent 
 
 ## 1a. Current system versus planned extensions
 
-| Concern | Standard `:4190` | Historical Kilo-only canary `:4290` | Future work |
+| Concern | Standard `:4190` | Kilo-only `:4290` | Boundary |
 | --- | --- | --- | --- |
-| Deployment state | current product | earlier isolated experiment | full OMP coding acceptance |
-| Providers | Kilo only; `auto` = `kilo/nex-agi/nex-n2.5-pro:free`; no second-model retry | Kilo only | verified policy snapshot and deeper telemetry |
-| OpenCode boundary | external legacy proxy only; not an ACP bridge or automatic route | not reachable from this service | official ACP integration belongs to an ACP client |
-| Tool fidelity | Kilo request fields pass through unchanged | Kilo request fields pass through unchanged | native OMP edit/test proof |
-| Discovery | five-second per-adapter request cache over the pinned Kilo model | same router cache over Kilo only | asynchronous signed/verified policy |
-| Billing admission | server allowlist pins the primary model | live Kilo catalogue zero prompt/completion price filtering | all billable dimensions and entitlement policy |
+| Deployment state | current router | explicit Kilo-only listener | no shared process |
+| Providers | OpenCode slots 1–3 only when exact ids are discovered from an explicitly configured, provider-authorized direct endpoint; Kilo slots 4–6 | Kilo only | no silent cross-backend retry |
+| OpenCode boundary | no default endpoint; no ACP or agent-session bridge | not applicable | public research does not establish all requested free IDs as direct-router access |
+| Tool fidelity | only backend-advertised capabilities are accepted | Kilo request fields pass through unchanged | unsupported capabilities return 422 |
+| Discovery | five-second per-adapter cache, emitted in exact preference order | same router cache over Kilo only | absent ids are not invented |
+| Billing admission | configuration and a `:free` name do not prove entitlement | Kilo provider terms apply | provider authorization remains external |
 | Service owner | launchd `com.dani-free` | launchd `com.dani-free.kilo-only` | no shared process |
-| Rollback | current listener | change OMP URL back to `:4190` | formal rollback test |
+| Rollback | remove unavailable OpenCode configuration; callers must select a discovered Kilo id or `:4290` | explicit deployment choice | never silent fallback |
 
 ### v2 non-negotiable boundaries
 
@@ -52,7 +52,7 @@ The router is a **model request router**. It is not the owner of OMP's subagent 
 | Component | Address / path | Owner | Responsibility |
 | --- | --- | --- | --- |
 | OMP harness | `~/.omp/agent/` | OMP | conversation state, tool calls, subagents, role-to-model assignment |
-| Dani-Free | `127.0.0.1:4190` | launchd `com.dani-free` | OpenAI-compatible router; standard listener is Kilo-only; `auto` aliases `kilo/nex-agi/nex-n2.5-pro:free`; no second-model retry |
+| Dani-Free | `127.0.0.1:4190` | launchd `com.dani-free` | OpenAI-compatible router; `auto` aliases OpenCode slot 1; models are advertised only when discovered; no second-model retry |
 | Dani-Free Kilo-only canary | `127.0.0.1:4290` | launchd `com.dani-free.kilo-only` | historical isolated Kilo-only inference listener |
 | Legacy OpenCode proxy | `127.0.0.1:4187` | external launchd service | separate OpenAI-compatible compatibility service; not an ACP bridge or Dani-Free automatic route |
 | Legacy OpenCode child server | `127.0.0.1:4188` | supervised by the external proxy | separate OpenCode session process; not owned by Dani-Free |
@@ -66,8 +66,8 @@ The router is a **model request router**. It is not the owner of OMP's subagent 
 ```text
 4187  external legacy OpenCode proxy only
 4188  external legacy OpenCode child only; not addressed by Dani-Free automatically
-4190  Dani-Free standard Kilo-only listener (`auto` → kilo/nex-agi/nex-n2.5-pro:free)
-4290  historical isolated Dani-Free Kilo-only canary
+4190  Dani-Free standard listener (`auto` → opencode/muse-spark-1.3-contributor-free; only discovered models are listed)
+4290  isolated Dani-Free Kilo-only listener (`auto` → kilo/nex-agi/nex-n2.5-pro:free)
 ```
 Any second listener on those ports is a configuration error. The external proxy must not be started by both launchd and another supervisor.
 
@@ -113,7 +113,7 @@ The OpenCode proxy logs showed real completions from roughly 50 seconds to 117 s
 
 ## 4. Dani-Free layer
 
-Source: `src/router.ts`, `src/server.ts`, and `src/adapters/`.
+Source: `src/router.ts`, `src/server.ts`, `src/cli.ts`, and `src/adapters/`.
 
 ### Public API
 
@@ -123,23 +123,28 @@ GET  /v1/models
 POST /v1/chat/completions
 ```
 
-`/v1/models` returns backend-prefixed selectors for the adapters that are configured and discoverable. The standard listener allowlists the pinned primary, so the advertised set is:
+`/v1/models` returns only backend-prefixed selectors that configured adapters discover. For the standard listener, discovered ids are emitted in this fixed preference order:
 
 ```text
+opencode/muse-spark-1.3-contributor-free
+opencode/muse-spark-1.2-contributor-free
+opencode/mimo-v2.5-free
 kilo/nex-agi/nex-n2.5-pro:free
+kilo/dots-studio/dots-3-note-preview:free
+kilo/nex-agi/nex-n2.5-mini:free
 ```
 
-`mimo/<model-id>` and `opencode/<model-id>` appear only when those adapters are deliberately supplied. They are not part of standard `dani-free start` and are never `auto`.
+An absent id is omitted. The standard listener has no default OpenCode endpoint, so OpenCode ids are absent until an explicitly configured, provider-authorized direct endpoint exposes them.
 
 ### Request modes
 
 #### Explicit request
 
 ```text
-model: kilo/<model-id>
+model: <backend>/<model-id>
 ```
 
-The router discovers the specified backend model and sends the request only there. It does not move to another model or another provider on failure. Explicit selectors fail closed. An `opencode/<id>` or `mimo/<id>` request is available only when that adapter is deliberately supplied.
+The router sends an explicit request only to that discovered backend/model. It never moves to another model or provider on failure.
 
 #### Automatic request
 
@@ -147,40 +152,19 @@ The router discovers the specified backend model and sends the request only ther
 model: auto
 ```
 
-`auto` aliases `kilo/nex-agi/nex-n2.5-pro:free` and uses the same fail-closed explicit path. Missing, unhealthy, 429, 503, and timeout responses return that error. The router does not retry another Kilo model or MiMo.
+`auto` aliases `opencode/muse-spark-1.3-contributor-free`. Missing, unhealthy, unsupported, 401, 403, 429, 503, and timeout responses fail that request. No Kilo or other fallback occurs.
 
-A former work-log policy treated network errors, HTTP 429, HTTP 5xx, and attempt timeout as retryable across a Kilo-then-MiMo candidate list. That is not current `:4190` behavior.
+### Discovery cache and capability admission
 
-### Discovery cache
-
-Dani-Free keeps a per-backend model cache for five seconds.
-
-```text
-first request or expired cache
-list configured adapters (standard start: Kilo only)
-cache successful model lists for 5 seconds
-
-subsequent request during TTL
-reuse cached lists
-```
-
-Discovery runs inside the request timeout. A concurrent request reuses the same pending discovery promise rather than starting duplicate provider requests. Standard start does not discover MiMo.
+Dani-Free keeps a per-backend model cache for five seconds. Concurrent requests reuse the same pending discovery. Capabilities come from backend discovery. Requests that require an unadvertised capability return 422 before the completion is sent.
 
 ### Time budgets
 
-The effective timing policy is:
+The configured request timeout defaults to 180 seconds. The Router class fallback is 120 seconds when instantiated without server configuration. Incoming cancellation terminates the same single attempt. There is no per-candidate retry window or automatic-routing fallback budget.
 
-| Scope | Limit | Purpose |
-| --- | ---: | --- |
-| configured router request timeout | normally 45 seconds from runtime config | single-attempt bound when the server was started through its configuration loader |
-| Router class fallback default | 120 seconds | used only if the server was not started through the configuration loader |
-| incoming request signal | propagated through the attempt | client cancellation is terminal and stops the attempt |
+## Historical work log
 
-There is no 30-second per-candidate retry window and no 90-second `auto` fallback budget. `auto` is one pinned Kilo model; a 429, 503, or timeout returns that error. Attempt deadlines remain active through streamed response EOF.
-
-### Important limit
-
-A single-attempt timeout cannot make a model complete a difficult 70k-token prompt quickly, and it cannot cap an OMP turn that internally performs several distinct completions or tool iterations. The former 90-second `auto` budget that tried serial model fallback is work-log history, not current `:4190` behavior.
+All sections below preserve prior investigations and rejected approaches. They are not current `:4190` operational policy, selector guidance, or release acceptance.
 
 ---
 

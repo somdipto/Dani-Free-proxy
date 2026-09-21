@@ -18,7 +18,7 @@ export interface RouterOptions {
 export const DEFAULT_TIMEOUT_MS = 120_000;
 export const DEFAULT_MAX_BODY_BYTES = 1_048_576;
 const MODEL_CACHE_TTL_MS = 5_000;
-export const DEFAULT_PRIMARY_MODEL = "kilo/nex-agi/nex-n2.5-pro:free";
+export const DEFAULT_PRIMARY_MODEL = "opencode/muse-spark-1.3-contributor-free";
 
 const BACKENDS = ["opencode", "kilo", "mimo"] as const;
 
@@ -391,6 +391,7 @@ export class Router {
   readonly apiKey?: string;
   readonly primaryModel: string;
   private readonly allowedModels?: ReadonlySet<string>;
+  private readonly allowedModelOrder?: readonly string[];
   private readonly modelCache = new Map<string, {
     expiresAt: number;
     models?: BackendModel[];
@@ -403,7 +404,8 @@ export class Router {
     this.maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
     this.apiKey = options.apiKey ?? process.env.DANI_FREE_API_KEY;
     this.primaryModel = options.primaryModel ?? DEFAULT_PRIMARY_MODEL;
-    this.allowedModels = options.allowedModels ? new Set(options.allowedModels) : undefined;
+    this.allowedModelOrder = options.allowedModels ? [...options.allowedModels] : undefined;
+    this.allowedModels = this.allowedModelOrder ? new Set(this.allowedModelOrder) : undefined;
   }
 
   private findAdapter(id: string): BackendAdapter | undefined {
@@ -436,8 +438,18 @@ export class Router {
   }
 
   async models(signal?: AbortSignal): Promise<BackendModel[]> {
-    const groups = await Promise.all(this.adapters.map((adapter) => this.modelsFor(adapter, signal)));
-    return groups.flat().filter((model) => !this.allowedModels || this.allowedModels.has(modelSelectorId(model)));
+    const models = (await Promise.all(this.adapters.map((adapter) => this.modelsFor(adapter, signal)))).flat();
+    if (!this.allowedModels || !this.allowedModelOrder) return models;
+
+    const discovered = new Map<string, BackendModel>();
+    for (const model of models) {
+      const id = modelSelectorId(model);
+      if (this.allowedModels.has(id) && !discovered.has(id)) discovered.set(id, model);
+    }
+    return this.allowedModelOrder.flatMap((id) => {
+      const model = discovered.get(id);
+      return model ? [model] : [];
+    });
   }
 
   async health(signal?: AbortSignal): Promise<BackendHealth[]> {
