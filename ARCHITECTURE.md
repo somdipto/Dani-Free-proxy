@@ -2,21 +2,21 @@
 
 **Historical launch gate (2026-09-20):** an earlier plan required both Kilo and OpenCode before launch, using public/non-sensitive data only. OpenCode explicitly prohibits free-tier use in other harnesses. See [external-access research and verified implementation defects](EXTERNAL_ACCESS_RESEARCH.md). No universal-proxy launch is authorized or verified.
 
-This document's current product is the standard listener on `127.0.0.1:4190`: three OpenCode free ids, then three Kilo free ids. `auto` aliases `opencode/muse-spark-1.3-contributor-free` and does not retry a second model. Later sections keep a work log of earlier Kilo-only and Kilo/MiMo routing. Treat historical sections as a work log, not release acceptance.
+This document's current product is the standard listener on `127.0.0.1:4190`: three OpenCode free ids, then three Kilo free ids. `auto` aliases `opencode/nemotron-3-ultra-free` and walks a six-model OpenCode-first failover chain (missing or unhealthy models are skipped; transport errors, timeouts, 429s, 5xx, and HTTP 200 with empty content advance to the next model; a 4xx refusal is passed through as-is). Later sections keep a work log of earlier Kilo-only and Kilo/MiMo routing. Treat historical sections as a work log, not release acceptance.
 
-**Evidence correction:** historical sections below contain superseded current-state wording. The current `:4190` contract is OpenCode then Kilo as listed by `/v1/models`; missing, unhealthy, 429, 503, and timeout responses return that error and never switch models.
+**Evidence correction:** historical sections below contain superseded current-state wording. The current `:4190` contract is OpenCode then Kilo as listed by `/v1/models`; missing or unhealthy models are skipped, and transport errors, timeouts, 429s (after a brief pause), 5xx, and HTTP 200 with empty content fail over to the next model in the chain. A 4xx refusal from an upstream is returned to the caller as-is.
 ---
 
 ## 1. Executive summary
 
-Dani-Free is a local OpenAI-compatible router on `127.0.0.1:4190`. `auto` aliases `opencode/muse-spark-1.3-contributor-free` and does not retry another model. `:4290` is Kilo-only with `auto` → Nex Pro.
+Dani-Free is a local OpenAI-compatible router on `127.0.0.1:4190`. `auto` aliases `opencode/nemotron-3-ultra-free` and walks the six-model OpenCode-first failover chain. `:4290` is Kilo-only with `auto` → Nex Pro.
 
 The external legacy OpenCode proxy, when separately configured, is a distinct service on `127.0.0.1:4187` with its own `opencode serve` child on port `4188`. Dani-Free does not own that service, its agent loop, or its tool policy.
 
 ```text
 OMP or another client
 Dani-Free :4190
-  OpenCode (auto → muse-spark-1.3-contributor-free)
+  OpenCode (auto → nemotron-3-ultra-free)
   Kilo Code (nex-n2.5-pro, dots-3-note-preview, nex-n2.5-mini)
 ```
 
