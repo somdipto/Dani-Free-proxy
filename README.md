@@ -1,6 +1,6 @@
 # Dani-Free
 
-Dani-Free is a small Bun/TypeScript local OpenAI-compatible router. The standard listener advertises three OpenCode free ids, then three Kilo free ids. `auto` is `opencode/nemotron-3-ultra-free`. If the selected model is missing, unhealthy, quota-exhausted, timed out, or otherwise failed, the router returns that error and does not switch models. Free-tier availability is promotional and can change; `:free` in an id is not a billing or privacy guarantee.
+Dani-Free is a small Bun/TypeScript local OpenAI-compatible router. The standard listener advertises three OpenCode free ids, then three Kilo free ids. `auto` is `opencode/nemotron-3-ultra-free`. If a selected model is missing or unhealthy it is skipped; if it fails with a transport error, a timeout, a 429 (retried after a short backoff), a 5xx, or an HTTP 200 with empty content, the router fails over to the next model in the chain. A 4xx refusal from the upstream is returned to the caller as-is with an `x-dani-free-model` header naming the model that answered. If every model in the chain fails, the caller gets a 503 `all_models_failed` with per-attempt reasons. Free-tier availability is promotional and can change; `:free` in an id is not a billing or privacy guarantee.
 
 ## Requirements
 
@@ -21,9 +21,9 @@ bun run start
 
 The default listener is `http://127.0.0.1:4190`. Override it with `DANI_FREE_HOST` and `DANI_FREE_PORT`. For development, `bun run dev` starts the same service with Bun's watcher. `bun run check` runs the TypeScript check; `bun test` runs the test suite.
 
-## Speed and cancellation behavior
+## Speed, failover, and cancellation behavior
 
-The router keeps a five-second model-discovery cache. The request deadline starts when the request is received, includes discovery, and stays active through streamed response EOF. Client cancellation is terminal. There is no second-model retry.
+The router keeps a five-second model-discovery cache. The request deadline starts when the request is received, includes discovery, and stays active through streamed response EOF. On failure the router walks the OpenCode-first chain: an explicit selector is tried first, then the remaining models. Client cancellation is terminal, and once streamed bytes have been emitted to the client there is no failing over. A 4xx from an upstream is passed through to the caller rather than retried.
 
 ## Configuration
 
