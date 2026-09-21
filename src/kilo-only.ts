@@ -1,13 +1,15 @@
 import { KiloAdapter } from "./adapters/kilo";
 import { KILO_FREE_MODELS, createRouterServer } from "./server";
+import { envHost, envNumber } from "./env-number";
 
-const host = process.env.DANI_FREE_HOST ?? "127.0.0.1";
-const port = Number(process.env.DANI_FREE_PORT ?? 4290);
+const host = envHost("DANI_FREE_HOST", "127.0.0.1");
+// Same bounds as loadConfig; kilo-only.ts bypasses config validation.
+const port = envNumber("DANI_FREE_PORT", 4290, 1, 65_535);
 const server = createRouterServer({
   host,
   port,
-  timeoutMs: Number(process.env.DANI_FREE_REQUEST_TIMEOUT_MS ?? 120_000),
-  maxBodyBytes: Number(process.env.DANI_FREE_BODY_LIMIT_BYTES ?? 4 * 1024 * 1024),
+  timeoutMs: envNumber("DANI_FREE_REQUEST_TIMEOUT_MS", 120_000, 100, 300_000),
+  maxBodyBytes: envNumber("DANI_FREE_BODY_LIMIT_BYTES", 4 * 1024 * 1024, 1_024, 100 * 1024 * 1024),
   primaryModel: KILO_FREE_MODELS[0],
   allowedModels: [...KILO_FREE_MODELS],
   adapters: [new KiloAdapter()],
