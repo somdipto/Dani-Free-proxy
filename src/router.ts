@@ -731,8 +731,8 @@ export class Router {
 
   /**
    * Walk the chain until one model returns a real answer.
-   * Retryable: network errors, upstream (non-client) timeouts, 429, 5xx, and
-   * HTTP 200 with empty/no text content. Never fails over after response bytes
+   * Retryable: network errors, upstream timeouts (including HTTP 408), 429, 5xx,
+   * and HTTP 200 with empty/no text content. Never fails over after response bytes
    * have been emitted to the client. All attempts share the caller's remaining
    * deadline via `signal`.
    */
@@ -771,7 +771,7 @@ export class Router {
           await this.failoverBackoff(signal);
           continue;
         }
-        if (status !== undefined && status >= 500) {
+        if (status !== undefined && (status === 408 || status >= 500)) {
           failures.push({ model: selector, status, reason: retryableStatusReason(error, status, "upstream error") });
           continue;
         }
@@ -796,7 +796,7 @@ export class Router {
         await this.failoverBackoff(signal);
         continue;
       }
-      if (status >= 500) {
+      if (status === 408 || status >= 500) {
         failures.push({
           model: selector,
           status,

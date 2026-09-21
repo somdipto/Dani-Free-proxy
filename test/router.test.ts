@@ -170,6 +170,23 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual(["a", "b"]);
   });
 
+  it("fails over on a 408 and labels the model that answered", async () => {
+    const calls: string[] = [];
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        if (request.model === "a") return new Response("upstream timeout", { status: 408, statusText: "Request Timeout" });
+        return Response.json({ ok: "b" });
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: "b" });
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
   it("tries an explicit model first, then the rest of the chain excluding it", async () => {
     const calls: string[] = [];
     const router = createRouter({
@@ -189,7 +206,7 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual(["a", "c"]);
   });
 
-  it.each([429, 503])("fails over on HTTP %s and reports every attempt when the chain is exhausted", async (status) => {
+  it.each([408, 429, 503])("fails over on HTTP %s and reports every attempt when the chain is exhausted", async (status) => {
     const calls: string[] = [];
     const router = createRouter({
       failoverBackoffMs: 1,
@@ -222,7 +239,7 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toBe(1);
   });
 
-  it.each([429, 503])("fails over on retryable typed HTTP %s errors", async (status) => {
+  it.each([408, 429, 503])("fails over on retryable typed HTTP %s errors", async (status) => {
     const calls: string[] = [];
     const router = createRouter({
       failoverBackoffMs: 1,

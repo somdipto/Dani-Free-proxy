@@ -2,9 +2,9 @@
 
 **Historical launch gate (2026-09-20):** an earlier plan required both Kilo and OpenCode before launch, using public/non-sensitive data only. OpenCode explicitly prohibits free-tier use in other harnesses. See [external-access research and verified implementation defects](EXTERNAL_ACCESS_RESEARCH.md). No universal-proxy launch is authorized or verified.
 
-This document's current product is the standard listener on `127.0.0.1:4190`: three OpenCode free ids, then three Kilo free ids. `auto` aliases `opencode/nemotron-3-ultra-free` and walks a six-model OpenCode-first failover chain (missing or unhealthy models are skipped; transport errors, timeouts, 429s, 5xx, and HTTP 200 with empty content advance to the next model; a 4xx refusal is passed through as-is). Later sections keep a work log of earlier Kilo-only and Kilo/MiMo routing. Treat historical sections as a work log, not release acceptance.
+This document's current product is the standard listener on `127.0.0.1:4190`: three OpenCode free ids, then three Kilo free ids. `auto` aliases `opencode/nemotron-3-ultra-free` and walks a six-model OpenCode-first failover chain (missing or unhealthy models are skipped; transport errors, timeouts, 408s, 429s, 5xx, and HTTP 200 with empty content advance to the next model; any other 4xx refusal is passed through as-is). Later sections keep a work log of earlier Kilo-only and Kilo/MiMo routing. Treat historical sections as a work log, not release acceptance.
 
-**Evidence correction:** historical sections below contain superseded current-state wording. The current `:4190` contract is OpenCode then Kilo as listed by `/v1/models`; missing or unhealthy models are skipped, and transport errors, timeouts, 429s (after a brief pause), 5xx, and HTTP 200 with empty content fail over to the next model in the chain. A 4xx refusal from an upstream is returned to the caller as-is.
+**Evidence correction:** historical sections below contain superseded current-state wording. The current `:4190` contract is OpenCode then Kilo as listed by `/v1/models`; missing or unhealthy models are skipped, and transport errors, timeouts, 408s, 429s (after a brief pause), 5xx, and HTTP 200 with empty content fail over to the next model in the chain. Any other 4xx refusal from an upstream is returned to the caller as-is.
 ---
 
 ## 1. Executive summary
