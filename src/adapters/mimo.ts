@@ -4,6 +4,7 @@ import type {
   BackendModel,
   ChatRequest,
 } from "../types.ts";
+import { redactDiagnostics } from "../redact";
 
 const BACKEND_ID = "mimo" as const;
 const DEFAULT_CONTEXT_WINDOW = 0;
@@ -467,7 +468,10 @@ export default class MimoAdapter implements BackendAdapter {
         healthy: false,
         checkedAt,
         latencyMs: Math.round(performance.now() - startedAt),
-        reason: error instanceof Error ? error.message : "MiMo Code health check failed",
+        // Exposed on GET /health: same redaction pass as router failover
+        // reasons so a misbehaving sidecar cannot leak a signed URL or
+        // credential into its health report.
+        reason: error instanceof Error ? redactDiagnostics(error.message) : "MiMo Code health check failed",
       };
     }
   }

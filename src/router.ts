@@ -5,6 +5,7 @@ import type {
   Capability,
   ChatRequest,
 } from "./types";
+import { redactDiagnostics } from "./redact";
 
 export interface RouterOptions {
   adapters?: BackendAdapter[];
@@ -284,18 +285,6 @@ function withModelHeader(response: Response, selector: string): Response {
     statusText: response.statusText,
     headers,
   });
-}
-
-/**
- * Strip URLs and bearer tokens from any diagnostic text that ends up in a
- * failover reason handed back to the client. Upstream error bodies can carry
- * signed URLs or leaked credentials; error messages already get this pass,
- * and typed JSON error details should too.
- */
-function redactDiagnostics(text: string): string {
-  return text
-    .replace(/https?:\/\/[^\s)"']+/g, "[url]")
-    .replace(/bearer\s+[^\s]+/gi, "Bearer [redacted]");
 }
 
 function sanitizeReason(error: unknown, fallback: string): string {
@@ -737,7 +726,11 @@ export class Router {
             configured: true,
             healthy: false,
             checkedAt: new Date().toISOString(),
-            reason: error instanceof Error ? error.message : "health check failed",
+            // Health reasons are exposed on GET /health, so a throwing health
+            // check gets the same redaction pass as failover reasons: a
+            // misbehaving sidecar can leak a signed URL or credential into its
+            // error message.
+            reason: error instanceof Error ? redactDiagnostics(error.message) : "health check failed",
           };
         }
       }),

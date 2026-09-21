@@ -5,6 +5,7 @@ import type {
   Capability,
   ChatRequest,
 } from "../types";
+import { redactDiagnostics } from "../redact";
 
 export const KILO_DEFAULT_BASE_URL = "https://api.kilo.ai/api/gateway";
 
@@ -154,7 +155,10 @@ export class KiloAdapter implements BackendAdapter {
         healthy: false,
         checkedAt,
         latencyMs: Date.now() - startedAt,
-        reason: error instanceof Error ? error.message : String(error),
+        // Exposed on GET /health: same redaction pass as router failover
+        // reasons so a misbehaving gateway cannot leak a signed URL or
+        // credential into its health report.
+        reason: error instanceof Error ? redactDiagnostics(error.message) : String(error),
       };
     }
   }

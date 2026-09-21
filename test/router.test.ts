@@ -891,4 +891,20 @@ describe("Dani-Free health reporting", () => {
     const [report] = await router.health();
     expect(report).toMatchObject({ backend: "kilo", configured: false, healthy: false });
   });
+
+  it("redacts signed URLs and bearer tokens from a throwing health check's reason", async () => {
+    const backend: BackendAdapter = {
+      id: "opencode",
+      async listModels() { return []; },
+      async health() { throw new Error("dial failed: https://sidecar.internal/x?token=secret Bearer abc123token"); },
+      async complete() { throw new Error("unreachable"); },
+    };
+    const router = createRouter({ adapters: [backend] });
+    const [report] = await router.health();
+    expect(report).toMatchObject({ backend: "opencode", configured: true, healthy: false });
+    expect(report.reason ?? "").toContain("[url]");
+    expect(report.reason ?? "").toContain("Bearer [redacted]");
+    expect(report.reason ?? "").not.toContain("secret");
+    expect(report.reason ?? "").not.toContain("abc123token");
+  });
 });
