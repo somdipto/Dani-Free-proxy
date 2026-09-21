@@ -1,6 +1,6 @@
 ---
 name: dani-free
-description: Operate the Dani-Free local OpenAI-compatible router. auto is opencode/muse-spark-1.3-contributor-free.
+description: Operate the Dani-Free local OpenAI-compatible router. auto starts at opencode/nemotron-3-ultra-free and walks the OpenCode-first six-model failover chain.
 Canonical agent integration guide: the package root `AGENT_INTEGRATION.md`. Use it for provider setup, protocol behavior, the six-model allowlist, OMP integration, SDK examples, failure handling, and the completion checklist.
 
 Use this skill to configure and operate the Dani-Free package; the package itself owns backend routing and protocol translation. Do not implement a second router in the skill.
@@ -16,7 +16,7 @@ The default listener is `127.0.0.1:4190`. Set `DANI_FREE_HOST` and `DANI_FREE_PO
 
 ## Model selectors and routing
 
-- `auto` selects `opencode/muse-spark-1.3-contributor-free`. The router does not retry another model.
+- `auto` starts at `opencode/nemotron-3-ultra-free` and walks the OpenCode-first six-model failover chain. Retryable failures (transport errors, 408, 429 with a brief backoff, 5xx, empty or oversize HTTP 200 bodies) advance to the next model; other 4xx refusals are passed through as-is. A request-deadline timeout or client cancellation never advances: it ends the request with a 504.
 - Standard listener ids: three OpenCode free models, then three Kilo free models.
 - Other `kilo/<id>`, `mimo/<id>`, and `opencode/<id>` values are rejected unless a custom adapter set was supplied.
 - Use an exact model id returned by `/v1/models`. Explicit selectors fail closed.

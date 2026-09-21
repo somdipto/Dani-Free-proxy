@@ -10,7 +10,7 @@ Dani-Free exposes these local HTTP routes:
 
 Set `model` in a chat request to one of:
 
-- `auto` — exact alias of `opencode/muse-spark-1.3-contributor-free`. No second-model retry.
+- `auto` — starts at `opencode/nemotron-3-ultra-free` and walks the OpenCode-first six-model failover chain on retryable failures (transport errors, 408, 429 with a brief backoff, 5xx, empty or oversize HTTP 200 bodies). Other 4xx refusals are passed through as-is.
 - the six ids from `GET /v1/models`.
 - any other selector — rejected unless the process was started with a custom adapter set and allowlist.
 
@@ -18,7 +18,7 @@ Use the exact id returned by `/v1/models`. Explicit selectors fail closed.
 
 ## Automatic routing contract
 
-`auto` is Muse Spark 1.3. Discovery uses a five-second cache. The request deadline includes discovery and stays active through streamed response EOF. Client cancellation is terminal. The router does not fall back after an error, cancellation, or timeout.
+`auto` starts at `opencode/nemotron-3-ultra-free`. Discovery uses a five-second cache. The request deadline includes discovery and stays active through streamed response EOF. Client cancellation and the request deadline are terminal: either ends the request with a 504 and never falls back to another model. Retryable upstream failures (transport errors, 408, 429 with a brief backoff, 5xx, empty or oversize HTTP 200 bodies) do fall back to the next model in the chain; other 4xx refusals are passed through as-is.
 
 ## Example
 

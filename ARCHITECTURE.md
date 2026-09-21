@@ -413,7 +413,7 @@ Use this checklist before claiming this stack is high quality:
 - [ ] Existing OMP session and background-task model assignments have been inspected after role changes.
 - [ ] MiMo is not auto-routable on the standard listener.
 - [ ] Model policy distinguishes `healthy`, `rate_limited`, `cooldown`, `exhausted`, and `disabled`.
-- [ ] Standard `auto` aliases `kilo/nex-agi/nex-n2.5-pro:free` and does not retry another model.
+- [ ] Standard `auto` aliases `opencode/nemotron-3-ultra-free` and walks the six-model OpenCode-first failover chain on retryable failures.
 - [ ] Requested capabilities are checked before candidate selection.
 - [ ] `auto` is one attempt; missing, unhealthy, 429, 503, and timeout return that error.
 - [ ] Attempt deadlines remain active through streamed response EOF and cancellation is propagated.
