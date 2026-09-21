@@ -312,6 +312,31 @@ describe("Dani-Free failover chain", () => {
     expect(await response.text()).toBe("quota hit, try later");
   });
 
+  it("redacts signed URLs and Bearer <redacted> smuggled into a passthrough status text", async () => {
+    const leakedUrl = "https://upstream.example/cb?sig=secret-signature";
+    const leakedToken = "<redacted>";
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", primaryId)], async () => {
+        throw new KiloBackendError(
+          "http://upstream",
+          401,
+          `Gateway refusal; see ${leakedUrl}; Authorization: Bearer ${leakedToken}`,
+          '{"error":"exhausted"}',
+        );
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(401);
+    // The body is served intact; only the smuggled diagnostics in the status
+    // text are masked.
+    expect(await response.text()).toBe('{"error":"exhausted"}');
+    expect(response.statusText).toContain("[url]");
+    expect(response.statusText).toContain("Bearer [redacted]");
+    expect(response.statusText).not.toContain(leakedUrl);
+    expect(response.statusText).not.toContain(leakedToken);
+  });
+
   it.each([408, 429, 503])("fails over on retryable typed HTTP %s errors", async (status) => {
     const calls: string[] = [];
     const router = createRouter({

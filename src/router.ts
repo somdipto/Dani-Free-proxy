@@ -235,6 +235,13 @@ function responseFromStatusError(error: unknown): Response | undefined {
   const status = statusFrom(error);
   if (!status) return undefined;
   const statusText = typeof error.statusText === "string" ? error.statusText : undefined;
+  // The status text comes from the upstream gateway, so it gets the same
+  // redaction pass as the failover reasons: a hostile gateway can smuggle a
+  // signed URL or a leaked credential into the status line, and this
+  // passthrough hands it straight to the client. The body itself is served
+  // intact (the client needs the refusal); only the smuggled diagnostics are
+  // masked.
+  const redactedStatusText = statusText === undefined ? undefined : redactDiagnostics(statusText);
   const body = typeof error.body === "string" ? error.body : "";
   // An adapter-thrown typed error body (e.g. OpenCodeError.body) is JSON; serve
   // it as JSON so OpenAI-compatible clients can parse the refusal. Plain-text
@@ -250,7 +257,7 @@ function responseFromStatusError(error: unknown): Response | undefined {
   }
   return new Response(body, {
     status,
-    statusText,
+    statusText: redactedStatusText,
     headers: {
       "content-type": json ? "application/json; charset=utf-8" : "text/plain; charset=utf-8",
     },
