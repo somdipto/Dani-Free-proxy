@@ -236,7 +236,25 @@ function responseFromStatusError(error: unknown): Response | undefined {
   if (!status) return undefined;
   const statusText = typeof error.statusText === "string" ? error.statusText : undefined;
   const body = typeof error.body === "string" ? error.body : "";
-  return new Response(body, { status, statusText, headers: { "content-type": "text/plain; charset=utf-8" } });
+  // An adapter-thrown typed error body (e.g. OpenCodeError.body) is JSON; serve
+  // it as JSON so OpenAI-compatible clients can parse the refusal. Plain-text
+  // bodies keep their text/plain label.
+  let json = false;
+  if (body.trim() !== "") {
+    try {
+      JSON.parse(body);
+      json = true;
+    } catch {
+      // Plain text stays plain text.
+    }
+  }
+  return new Response(body, {
+    status,
+    statusText,
+    headers: {
+      "content-type": json ? "application/json; charset=utf-8" : "text/plain; charset=utf-8",
+    },
+  });
 }
 
 const BACKEND_CHAIN_PRIORITY: Record<string, number> = { opencode: 0, kilo: 1, mimo: 2 };

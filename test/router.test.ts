@@ -236,7 +236,34 @@ describe("Dani-Free failover chain", () => {
     });
     const response = await router.handle(chat());
     expect([response.status, response.statusText, await response.text()]).toEqual([401, "Gateway refusal", '{"error":"exhausted"}']);
+    expect(response.headers.get("content-type")).toContain("application/json");
     expect(calls).toBe(1);
+  });
+
+  it("serves a JSON typed error body as JSON on a non-retryable passthrough", async () => {
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", primaryId)], async () => {
+        throw new KiloBackendError("http://upstream", 403, "Gateway refusal", '{"error":{"message":"key revoked","type":"auth","code":"revoked"}}');
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(403);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(await response.json()).toEqual({ error: { message: "key revoked", type: "auth", code: "revoked" } });
+  });
+
+  it("keeps a plain-text error body as text/plain on a non-retryable passthrough", async () => {
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", primaryId)], async () => {
+        throw new KiloBackendError("http://upstream", 400, "Bad gateway", "quota hit, try later");
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(400);
+    expect(response.headers.get("content-type")).toContain("text/plain");
+    expect(await response.text()).toBe("quota hit, try later");
   });
 
   it.each([408, 429, 503])("fails over on retryable typed HTTP %s errors", async (status) => {
