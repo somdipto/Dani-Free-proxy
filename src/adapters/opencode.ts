@@ -92,6 +92,18 @@ function errorReason(error: unknown): string {
   return "request failed";
 }
 
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason instanceof DOMException
+    ? signal.reason
+    : new DOMException("The operation was aborted", "AbortError");
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException
+    ? error.name === "AbortError"
+    : error instanceof Error && error.name === "AbortError";
+}
+
 function joinUrl(baseUrl: URL, path: string): URL {
   const url = new URL(baseUrl.toString());
   const basePath = url.pathname.endsWith("/") ? url.pathname.slice(0, -1) : url.pathname;
@@ -536,16 +548,36 @@ export class OpenCodeAdapter implements BackendAdapter {
    * Read at most MAX_OPENCODE_ERROR_BODY_BYTES of an upstream error body for
    * diagnostics, then stop the stream. Mirrors the Kilo adapter's
    * readErrorSnippet: a mid-read body failure diagnoses with nothing, like
-   * the old full-read path which swallowed body errors the same way.
+   * the old full-read path which swallowed body errors the same way. The read
+   * honors the caller's abort signal: a sidecar that answers with an error
+   * status and then trickles (or never finishes) the error body must fail
+   * fast on caller cancellation instead of stalling the failover chain until
+   * the router's outer deadline fires. Cancellation rethrows the abort error
+   * (never retried); genuine body failures still diagnose with nothing.
    */
-  private async readErrorBody(response: Response): Promise<string> {
+  private async readErrorBody(response: Response, signal: AbortSignal): Promise<string> {
     if (!response.body) return "";
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];
     let bytes = 0;
+    let aborted = false;
+    const onAbort = () => {
+      aborted = true;
+      // Cancelling makes the pending read() below settle with { done: true }
+      // instead of hanging on the dead stream.
+      void reader.cancel(abortReason(signal)).catch(() => undefined);
+    };
     try {
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
       while (bytes < MAX_OPENCODE_ERROR_BODY_BYTES) {
         const part = await reader.read();
+        // The caller left (deadline or client cancel): surface the abort so
+        // the router treats it as cancellation, not a retryable failure.
+        if (aborted) throw abortReason(signal);
         if (part.done) break;
         chunks.push(part.value);
         bytes += part.value.byteLength;
@@ -554,9 +586,11 @@ export class OpenCodeAdapter implements BackendAdapter {
       // the cap on its own, so slice after concat rather than trusting chunk size.
       const text = new TextDecoder().decode(Buffer.concat(chunks).subarray(0, MAX_OPENCODE_ERROR_BODY_BYTES));
       return truncate(text.trim(), 300);
-    } catch {
+    } catch (error) {
+      if (isAbortError(error)) throw error;
       return "";
     } finally {
+      signal.removeEventListener("abort", onAbort);
       await reader.cancel().catch(() => undefined);
       reader.releaseLock();
     }
@@ -582,7 +616,7 @@ export class OpenCodeAdapter implements BackendAdapter {
       });
     }
     if (!response.ok) {
-      const detail = await this.readErrorBody(response);
+      const detail = await this.readErrorBody(response, signal);
       throw new OpenCodeError(
         `failed to create OpenCode session: HTTP ${response.status}${detail ? ` — ${detail}` : ""}`,
         { status: response.status, code: "session_create_failed" },
@@ -618,7 +652,7 @@ export class OpenCodeAdapter implements BackendAdapter {
       });
     }
     if (!response.ok) {
-      const detail = await this.readErrorBody(response);
+      const detail = await this.readErrorBody(response, signal);
       throw new OpenCodeError(
         `OpenCode message failed: HTTP ${response.status}${detail ? ` — ${detail}` : ""}`,
         { status: response.status, code: "message_failed" },

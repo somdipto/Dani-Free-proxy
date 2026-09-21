@@ -197,7 +197,7 @@ export class KiloAdapter implements BackendAdapter {
     }
     console.error(`[kilo] ${init.method ?? "GET"} ${path} -> ${response.status} in ${Date.now() - startedAt}ms`);
     if (!response.ok) {
-      const body = await readErrorSnippet(response);
+      const body = await readErrorSnippet(response, init.signal ?? undefined);
       throw new KiloBackendError(url, response.status, response.statusText, body);
     }
     return response;
@@ -269,29 +269,63 @@ const DISCOVERY_MESSAGES = {
 /**
  * Read at most `MAX_KILO_ERROR_BODY_BYTES` of an upstream error body, then
  * stop the stream. Mirrors the router's readUpstreamSnippet: mid-read body
- * failures diagnose as nothing, like the old full-read path.
+ * failures diagnose as nothing, like the old full-read path. The read also
+ * honors the caller's abort signal: a gateway that answers with an error
+ * status and then trickles (or never finishes) the error body must fail fast
+ * on caller cancellation instead of stalling the failover chain until the
+ * router's outer deadline fires. Cancellation rethrows the abort error (never
+ * retried); genuine body failures still diagnose with nothing.
  */
-async function readErrorSnippet(response: Response): Promise<string> {
+async function readErrorSnippet(response: Response, signal?: AbortSignal | null): Promise<string> {
   if (!response.body) return "";
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let bytes = 0;
+  let aborted = false;
+  const onAbort = () => {
+    aborted = true;
+    // Cancelling makes the pending read() below settle with { done: true }
+    // instead of hanging on the dead stream.
+    void reader.cancel(abortReason(signal)).catch(() => undefined);
+  };
   try {
+    if (signal?.aborted) {
+      onAbort();
+    } else {
+      signal?.addEventListener("abort", onAbort, { once: true });
+    }
     while (bytes < MAX_KILO_ERROR_BODY_BYTES) {
       const part = await reader.read();
+      // The caller left (deadline or client cancel): surface the abort so the
+      // router treats it as cancellation, not a retryable network error.
+      if (aborted) throw abortReason(signal);
       if (part.done) break;
       chunks.push(part.value);
       bytes += part.value.byteLength;
     }
-    // Enforce the byte cap exactly: one upstream chunk can be larger than the
-    // cap on its own, so slice after concat rather than trusting chunk size.
+    // Enforce the byte cap exactly: one upstream chunk can be larger than
+    // the cap on its own, so slice after concat rather than trusting chunk size.
     return new TextDecoder().decode(Buffer.concat(chunks).subarray(0, MAX_KILO_ERROR_BODY_BYTES));
-  } catch {
+  } catch (error) {
+    if (isAbortError(error)) throw error;
     return "";
   } finally {
+    signal?.removeEventListener("abort", onAbort);
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
+}
+
+function abortReason(signal?: AbortSignal | null): unknown {
+  return signal?.reason instanceof DOMException
+    ? signal.reason
+    : new DOMException("The operation was aborted", "AbortError");
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException
+    ? error.name === "AbortError"
+    : error instanceof Error && error.name === "AbortError";
 }
 
 function extractErrorDetail(body: string): string {
