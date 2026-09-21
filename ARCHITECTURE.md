@@ -2,9 +2,9 @@
 
 **Historical launch gate (2026-09-20):** an earlier plan required both Kilo and OpenCode before launch, using public/non-sensitive data only. OpenCode explicitly prohibits free-tier use in other harnesses. See [external-access research and verified implementation defects](EXTERNAL_ACCESS_RESEARCH.md). No universal-proxy launch is authorized or verified.
 
-This document's current product is the standard listener on `127.0.0.1:4190`: three OpenCode free ids, then three Kilo free ids. `auto` aliases `opencode/nemotron-3-ultra-free` and walks a six-model OpenCode-first failover chain (missing or unhealthy models are skipped; transport errors, timeouts, 408s, 429s, 5xx, and HTTP 200 with empty content advance to the next model; any other 4xx refusal is passed through as-is). Later sections keep a work log of earlier Kilo-only and Kilo/MiMo routing. Treat historical sections as a work log, not release acceptance.
+This document's current product is the standard listener on `127.0.0.1:4190`: three OpenCode free ids, then three Kilo free ids. `auto` aliases `opencode/nemotron-3-ultra-free` and walks a six-model OpenCode-first failover chain (missing or unhealthy models are skipped; transport errors, 408s, 429s, 5xx, and HTTP 200 with empty content advance to the next model; a request-deadline timeout ends the chain with a 504 instead of advancing; any other 4xx refusal is passed through as-is). Later sections keep a work log of earlier Kilo-only and Kilo/MiMo routing. Treat historical sections as a work log, not release acceptance.
 
-**Evidence correction:** historical sections below contain superseded current-state wording. The current `:4190` contract is OpenCode then Kilo as listed by `/v1/models`; missing or unhealthy models are skipped, and transport errors, timeouts, 408s, 429s (after a brief pause), 5xx, and HTTP 200 with empty content fail over to the next model in the chain. Any other 4xx refusal from an upstream is returned to the caller as-is.
+**Evidence correction:** historical sections below contain superseded current-state wording. The current `:4190` contract is OpenCode then Kilo as listed by `/v1/models`; missing or unhealthy models are skipped, and transport errors, 408s, 429s (after a brief pause), 5xx, and HTTP 200 with empty content fail over to the next model in the chain. A request-deadline timeout ends the chain with a 504 instead of advancing. Any other 4xx refusal from an upstream is returned to the caller as-is.
 ---
 
 ## 1. Executive summary
@@ -144,7 +144,7 @@ kilo/nex-agi/nex-n2.5-mini:free
 model: kilo/<model-id>
 ```
 
-The router resolves the explicit selector first. If that attempt fails with a retryable condition (transport error, timeout, 408, 429, 5xx, HTTP 200 with empty content, or HTTP 200 with a body exceeding the 8 MiB buffer cap), the router continues with the rest of the standard OpenCode-first chain. A missing or unhealthy explicit model fails closed without touching the chain. An `opencode/<id>` or `mimo/<id>` request is available only when that adapter is deliberately supplied.
+The router resolves the explicit selector first. If that attempt fails with a retryable condition (transport error, 408, 429, 5xx, HTTP 200 with empty content, or HTTP 200 with a body exceeding the 8 MiB buffer cap), the router continues with the rest of the standard OpenCode-first chain. A missing or unhealthy explicit model fails closed without touching the chain. An `opencode/<id>` or `mimo/<id>` request is available only when that adapter is deliberately supplied.
 
 #### Automatic request
 
@@ -152,7 +152,7 @@ The router resolves the explicit selector first. If that attempt fails with a re
 model: auto
 ```
 
-`auto` aliases `opencode/nemotron-3-ultra-free` and walks the OpenCode-first six-model failover chain. A missing or unhealthy model is skipped; a transport error, timeout, 408, 429 (pauses briefly with backoff, then advances), 5xx, an HTTP 200 with empty content, or an HTTP 200 whose body exceeds the 8 MiB buffer cap fails over to the next model. Any other 4xx refusal is returned to the caller as-is. If every model in the chain fails, the caller gets a 503 `all_models_failed` with per-attempt reasons.
+`auto` aliases `opencode/nemotron-3-ultra-free` and walks the OpenCode-first six-model failover chain. A missing or unhealthy model is skipped; a transport error, 408, 429 (pauses briefly with backoff, then advances), 5xx, an HTTP 200 with empty content, or an HTTP 200 whose body exceeds the 8 MiB buffer cap fails over to the next model. Any other 4xx refusal is returned to the caller as-is. If every model in the chain fails, the caller gets a 503 `all_models_failed` with per-attempt reasons.
 
 A former work-log policy treated network errors, HTTP 429, HTTP 5xx, and attempt timeout as retryable across a Kilo-then-MiMo candidate list, and a later Kilo-only canary pinned `auto` to one Kilo model with no second-model retry. Neither is current `:4190` behavior.
 
@@ -181,7 +181,7 @@ The effective timing policy is:
 | Router class fallback default | 120 seconds | used only if the server was not started through the configuration loader |
 | incoming request signal | propagated through the attempt | client cancellation is terminal and stops the attempt |
 
-There is no 30-second per-candidate retry window and no 90-second `auto` fallback budget. `auto` is the OpenCode-first six-model failover chain starting at `opencode/nemotron-3-ultra-free`; a transport error, timeout, 408, 429 (with backoff), or 5xx fails over to the next model, and if all fail the caller gets a 503 `all_models_failed`. Attempt deadlines remain active through streamed response EOF.
+There is no 30-second per-candidate retry window and no 90-second `auto` fallback budget. `auto` is the OpenCode-first six-model failover chain starting at `opencode/nemotron-3-ultra-free`; a transport error, 408, 429 (with backoff), or 5xx fails over to the next model, and if all fail the caller gets a 503 `all_models_failed`. Attempt deadlines remain active through streamed response EOF.
 
 ### Important limit
 
@@ -363,7 +363,7 @@ MiMo adapter: configured MiMo service (not standard start)
 | `5xx` | provider | transient upstream failure | fail over to the next model |
 | HTTP 200 with empty content | provider | empty-content quirk | fail over to the next model |
 | HTTP 200 with oversized body | provider | body exceeds the 8 MiB buffer cap | fail over to the next model |
-| `504 timeout` | router | discovery or attempt deadline reached | fail over on an attempt timeout; return 504 on discovery/client cancellation |
+| `504 timeout` | router | shared request deadline reached | return 504; remaining models are not tried |
 | all models failed | router | every model in the chain failed | 503 `all_models_failed` with per-attempt reasons |
 | cancellation | router | incoming request signal fired | propagate cancellation and stop; do not retry or fall back |
 | capability mismatch | router | candidate cannot satisfy request | exclude candidate; do not silently switch an explicit selector |
@@ -458,7 +458,7 @@ The stack is a useful local compatibility layer, but it is not a transparent rep
 The currently correct narrow claim is:
 
 ```text
-Dani-Free's standard `:4190` listener is OpenCode-first, then Kilo; `auto` aliases `opencode/nemotron-3-ultra-free` and fails over across a six-model chain (transport errors, timeouts, 408, 429 with backoff, 5xx, empty or oversized 200s), passing other 4xx refusals through as-is.
+Dani-Free's standard `:4190` listener is OpenCode-first, then Kilo; `auto` aliases `opencode/nemotron-3-ultra-free` and fails over across a six-model chain (transport errors, 408, 429 with backoff, 5xx, empty or oversized 200s), passing other 4xx refusals through as-is.
 ```
 
 The claim it cannot currently support is:
