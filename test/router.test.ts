@@ -689,6 +689,23 @@ describe("Dani-Free request lifetime", () => {
     expect(cancelled).toBe(true);
   });
 
+  it("detects a mixed-case SSE content type and ends an aborted stream with a stop frame", async () => {
+    const controller = new AbortController();
+    const router = createRouter([adapter("kilo", [model("kilo", primaryId)], async () => new Response(new ReadableStream(), {
+      headers: { "content-type": "Text/Event-Stream" },
+    }))]);
+    const response = await router.handle(chat("auto", { stream: true }, controller.signal));
+    expect(response.status).toBe(200);
+    if (!response.body) throw new Error("expected a response body");
+    const reader = response.body.getReader();
+    const first = reader.read();
+    controller.abort();
+    const part = await first;
+    expect(part.done).toBe(false);
+    expect(new TextDecoder().decode(part.value)).toContain("data: [DONE]");
+    await expect(reader.read()).resolves.toMatchObject({ done: true });
+  });
+
   it("disposes the deadline on real EOF but preserves an upstream stream failure", async () => {
     const time = clock();
     try {

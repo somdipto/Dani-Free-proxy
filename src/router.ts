@@ -551,7 +551,8 @@ function responseWithDeadline(response: Response, scope: CombinedSignal): Respon
   const reader = response.body.getReader();
   let settled = false;
   let onAbort: () => void;
-  const sse = (response.headers.get("content-type") ?? "").includes("text/event-stream");
+  // Media types are case-insensitive (RFC 9110): normalize like isJsonResponse does.
+  const sse = (response.headers.get("content-type") ?? "").toLowerCase().includes("text/event-stream");
   const dispose = () => {
     if (settled) return;
     settled = true;
