@@ -1,0 +1,11 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "fixture-model",
+      "object": "model",
+      "created": 1704067200,
+      "owned_by": "fixture"
+    }
+  ]
+}

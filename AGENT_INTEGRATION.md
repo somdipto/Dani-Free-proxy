@@ -1,0 +1,324 @@
+# Dani-Free: agent integration guide
+
+This is the canonical guide for an AI coding agent, developer, or integration author connecting to Dani-Free.
+
+## 1. What Dani-Free is
+
+Dani-Free is a local OpenAI-compatible model router. The standard listener lists three OpenCode free ids, then three Kilo free ids, and pins `auto` to `opencode/muse-spark-1.3-contributor-free`. It does not retry another model on quota, timeout, or upstream failure.
+
+```text
+Dani-Free standard route:
+auto → opencode/muse-spark-1.3-contributor-free
+```
+
+The agent does not need a Dani-Free plugin. It only needs support for a custom OpenAI-compatible provider.
+
+Dani-Free is not a model, training service, credential vault, or replacement for the backend clients. It translates and routes requests; backend credentials remain backend configuration.
+
+## 2. The provider contract
+
+Default local endpoint:
+
+```text
+Base URL: http://127.0.0.1:4190/v1
+API key:  local, unless DANI_FREE_API_KEY is set
+```
+
+Required client operations:
+
+```http
+GET  /v1/models
+POST /v1/chat/completions
+```
+
+The router also exposes:
+
+```http
+GET /health
+```
+
+Minimal request:
+
+```json
+{
+  "model": "auto",
+  "messages": [
+    {"role": "user", "content": "Reply with exactly ACK"}
+  ]
+}
+```
+
+Minimal shell verification:
+
+```sh
+curl -fsS http://127.0.0.1:4190/health
+curl -fsS http://127.0.0.1:4190/v1/models
+curl -fsS http://127.0.0.1:4190/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"auto","messages":[{"role":"user","content":"Reply with exactly ACK"}]}'
+```
+
+If `DANI_FREE_API_KEY` is configured, send it as:
+
+```http
+Authorization: Bearer <DANI_FREE_API_KEY>
+```
+
+Never put a real key in a checked-in config, prompt, fixture, or diagnostic report.
+
+## 3. Model selection
+
+Always call `/v1/models` and use an exact returned id.
+
+Supported selectors on the standard listener:
+
+```text
+auto                                          Alias of opencode/muse-spark-1.3-contributor-free
+opencode/muse-spark-1.3-contributor-free      OpenCode slot 1
+opencode/muse-spark-1.2-contributor-free      OpenCode slot 2
+opencode/mimo-v2.5-free                       OpenCode slot 3
+kilo/nex-agi/nex-n2.5-pro:free                Kilo slot 4
+kilo/dots-studio/dots-3-note-preview:free     Kilo slot 5
+kilo/nex-agi/nex-n2.5-mini:free               Kilo slot 6
+```
+
+Example:
+
+```json
+{"model":"kilo/nex-agi/nex-n2.5-pro:free", "messages":[...]}
+```
+
+Routing rules:
+
+- `auto` maps to `opencode/muse-spark-1.3-contributor-free` and then uses the same explicit path as that selector.
+- Missing, unhealthy, HTTP 401/429/503, and timeout failures are returned to the caller. The router does not try another model.
+- Explicit selectors fail closed: they never silently switch to another backend or model.
+- Other `kilo/<id>`, `mimo/<id>`, and `opencode/<id>` selectors are rejected unless the process was started with a custom adapter set and allowlist.
+- An id appearing in `/v1/models` proves discovery, not guaranteed generation. Free-tier capacity can change.
+
+## 4. Start and install
+
+Requirements:
+
+- Bun 1.1+
+- A configured backend endpoint or local backend command
+- Backend credentials where required
+
+Portable install from a checkout:
+
+```sh
+cd /path/to/dani-free
+./install.sh
+```
+
+Manual start:
+
+```sh
+bun install
+bun run start
+```
+
+The installer adds `dani-free` to `~/.local/bin` and copies the operational skill into the OMP and OpenCode skill directories for documentation and invocation convenience. That installation does not install or authenticate backend services, does not add OpenCode to the automatic pool, and does not implement OpenCode ACP.
+
+Useful commands:
+
+```sh
+dani-free start
+dani-free status
+dani-free models
+dani-free doctor
+```
+
+The default listener is loopback-only. Do not bind it to a network interface unless the network is trusted and an external authentication/TLS boundary exists.
+
+## 5. Configuration
+
+Configuration can come from:
+
+1. environment variables;
+2. optional JSON at `~/.config/dani-free/config.json`;
+3. command-line host/port overrides.
+
+Common variables:
+
+```text
+DANI_FREE_HOST=127.0.0.1
+DANI_FREE_PORT=4190
+DANI_FREE_API_KEY=<client-key>
+
+DANI_FREE_OPENCODE_BASE_URL=<verified-endpoint-if-explicitly-using-legacy-compatibility>
+DANI_FREE_OPENCODE_API_KEY=<optional>
+
+DANI_FREE_KILO_BASE_URL=https://api.kilo.ai/api/gateway
+DANI_FREE_KILO_API_KEY=<required-by-kilo>
+
+DANI_FREE_MIMO_BASE_URL=<verified-openai-endpoint>
+DANI_FREE_MIMO_API_KEY=<optional>
+DANI_FREE_MIMO_COMMAND=/absolute/path/to/mimo
+DANI_FREE_MIMO_PROTOCOL=opencode
+DANI_FREE_MIMO_SERVE_PORT=4191
+```
+
+The standard listener uses the OpenCode HTTP adapter plus Kilo. MiMo environment variables do not enroll extra models in `auto`.
+
+## 6. Backend-specific setup
+
+### Kilo Code
+
+Kilo ids use Kilo's gateway. Configure `DANI_FREE_KILO_API_KEY` before starting the router. `:4290` is Kilo-only and pins `auto` to Nex Pro.
+
+### OpenCode
+
+OpenCode ids go through the local `:4187` proxy. Dani-Free does not implement OpenCode ACP.
+
+## 7. Optional legacy OpenCode client configuration
+
+The following fragment configures an OpenCode client to call Dani-Free as an OpenAI-compatible provider. It is not an OpenCode ACP bridge and does not enable the legacy OpenCode adapter in Dani-Free's automatic pool.
+
+Merge this into the user's existing OpenCode config. Preserve existing providers and append `dani-free` to `enabled_providers`; do not replace the whole array blindly.
+
+```jsonc
+{
+  "enabled_providers": ["dani-free"],
+  "provider": {
+    "dani-free": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Dani-Free",
+      "options": {
+        "baseURL": "http://127.0.0.1:4190/v1",
+        "apiKey": "local"
+      },
+      "models": {
+        "auto": {"name": "Dani-Free Auto"}
+      }
+    }
+  }
+}
+```
+
+If an existing `enabled_providers` array is present, merge rather than overwrite it. Use this only for an explicit client integration; do not describe it as native OpenCode ACP or as proof of OpenCode free-tier availability.
+
+## 8. OMP configuration
+
+Copy the provider block from `integrations/omp-models.yml` into `~/.omp/agent/models.yml` and select:
+
+```text
+dani-free/auto
+```
+
+OMP must be able to reach the router before selecting the model. `auto` is the pinned Kilo model. Verify with:
+
+```sh
+omp models find dani-free --json
+omp -p --no-tools --no-session --model dani-free/auto \
+  'Reply with exactly ACK'
+```
+
+## 9. Other agents and SDKs
+
+For any agent exposing a custom OpenAI-compatible provider, enter:
+
+```text
+Provider name: Dani-Free
+Base URL:      http://127.0.0.1:4190/v1
+API key:       local, or DANI_FREE_API_KEY
+Model:         auto
+```
+
+Examples of clients that can use this pattern include Continue, Cline, Roo Code, LibreChat, Jan, and custom OpenAI SDK clients. Their exact config syntax differs; the transport values do not.
+
+Python example:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:4190/v1",
+    api_key="local",
+)
+
+result = client.chat.completions.create(
+    model="auto",
+    messages=[{"role": "user", "content": "Reply with exactly ACK"}],
+)
+print(result.choices[0].message.content)
+```
+
+JavaScript example:
+
+```ts
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "http://127.0.0.1:4190/v1",
+  apiKey: "local",
+});
+
+const result = await client.chat.completions.create({
+  model: "auto",
+  messages: [{ role: "user", content: "Reply with exactly ACK" }],
+});
+console.log(result.choices[0].message.content);
+```
+
+## 10. Agent implementation algorithm
+
+An agent integrating Dani-Free should follow this sequence:
+
+1. Start or locate the router.
+2. `GET /health`.
+3. `GET /v1/models`.
+4. Filter models by requested capability, if the client uses capabilities.
+5. Select `auto` or `kilo/nex-agi/nex-n2.5-pro:free`.
+6. Send a minimal non-streaming request first.
+7. Enable streaming only if the selected backend/client path is known to support it.
+8. Preserve backend error status and message in diagnostics, after redaction.
+9. Do not invent model ids or silently substitute another backend for an explicit selector.
+10. Do not retry a failed completion against another model.
+11. Propagate request cancellation and treat cancellation as terminal.
+
+## 11. Failure interpretation
+
+| Result | Meaning | Action |
+|---|---|---|
+| `401` | Dani-Free client key is missing or invalid | Send the configured bearer key |
+| `403` | Upstream credential rejected | Check backend credentials |
+| `404` | Wrong Dani-Free route, explicit backend, or model selector | Check the exact selector; do not fall back |
+| `429` | Upstream throttling | Return the error; do not switch models |
+| `5xx` | Backend failure with its upstream status preserved | Return the error; do not switch models |
+| `502 backend_network_error` | Router could not complete the upstream request | Inspect backend health and endpoint |
+| `503` | Pinned model missing, unhealthy, or backend unavailable | Fix Kilo configuration or wait; do not switch models |
+| `504 timeout` | Discovery or the request reached its deadline | Check Kilo, request cancellation, and the router timeout |
+| empty `/v1/models` | Discovery failed or no backend is configured | Check `/health` and credentials |
+
+## 12. Security rules
+
+- Bind to `127.0.0.1` by default.
+- Do not expose the router directly to an untrusted network.
+- Use `DANI_FREE_API_KEY` when multiple local processes need separation.
+- Keep backend credentials outside source control.
+- Use absolute trusted executable paths for `DANI_FREE_MIMO_COMMAND`.
+- Never interpolate request text into a shell command.
+- Redact authorization headers, keys, cookies, and sensitive prompts.
+- Treat model output and tool calls as untrusted input.
+
+## 13. What this contract does not promise
+
+The current contract is centered on `/v1/chat/completions`, model discovery, text messages, and backend routing. It does not promise full support for every OpenAI API surface, including embeddings, audio, image generation, or `/v1/responses`. It also does not implement OpenCode ACP, native OpenCode tool ownership, or a universal agent harness.
+
+## 14. Integration checklist
+
+Before declaring an agent integration complete:
+
+- [ ] Router starts on the intended host and port.
+- [ ] `/health` responds.
+- [ ] `/v1/models` returns at least one intended model.
+- [ ] The exact selected model id came from `/v1/models`.
+- [ ] Requested capabilities match the selected model.
+- [ ] A minimal non-streaming completion returns text.
+- [ ] Authentication is tested if enabled.
+- [ ] Streaming behavior and cancellation are tested before enabling them by default.
+- [ ] Existing provider config was merged, not overwritten.
+- [ ] Failures stay on the pinned model; no silent backend switch.
+- [ ] Secrets are absent from logs, docs, and commits.
+- [ ] Backend-specific failures remain visible.

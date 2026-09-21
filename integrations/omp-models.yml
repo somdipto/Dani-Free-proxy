@@ -1,0 +1,15 @@
+# Merge this provider into ~/.omp/agent/models.yml.
+# Dani-Free owns backend discovery; OMP talks to one local OpenAI-compatible endpoint.
+providers:
+  dani-free:
+    baseUrl: http://127.0.0.1:4190/v1
+    api: openai-completions
+    auth: none
+    models:
+      - id: auto
+        name: Dani-Free Auto
+        reasoning: true
+        input: [text]
+        contextWindow: 128000
+        maxTokens: 16384
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }

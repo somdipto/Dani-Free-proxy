@@ -1,0 +1,21 @@
+{
+  // Legacy OpenCode client fragment: this configures an OpenCode client to call
+  // Dani-Free over its OpenAI-compatible API. It is not OpenCode ACP, does not
+  // enable an OpenCode backend in Dani-Free, and does not add OpenCode to auto.
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "dani-free": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Dani-Free",
+      "options": {
+        "baseURL": "http://127.0.0.1:4190/v1",
+        "apiKey": "local"
+      },
+      "models": {
+        "auto": {
+          "name": "Dani-Free Auto"
+        }
+      }
+    }
+  }
+}
