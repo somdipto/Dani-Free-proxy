@@ -727,9 +727,14 @@ export class Router {
         try {
           return await raceWithSignal(Promise.resolve().then(() => adapter.health(signal)), signal);
         } catch (error) {
+          // A throwing health check means the check itself failed, not that the
+          // backend is unconfigured: the adapter is registered with the router,
+          // so configured stays true. (Adapters report configured: false
+          // themselves when they genuinely lack configuration; that path
+          // resolves rather than throws, so it never reaches this catch.)
           return {
             backend: adapter.id,
-            configured: false,
+            configured: true,
             healthy: false,
             checkedAt: new Date().toISOString(),
             reason: error instanceof Error ? error.message : "health check failed",

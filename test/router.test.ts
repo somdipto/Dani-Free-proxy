@@ -863,3 +863,32 @@ describe("Dani-Free request lifetime", () => {
     } finally { time.restore(); }
   });
 });
+
+describe("Dani-Free health reporting", () => {
+  it("reports a registered adapter whose health check throws as configured but unhealthy", async () => {
+    const backend: BackendAdapter = {
+      id: "opencode",
+      async listModels() { return []; },
+      async health() { throw new Error("sidecar unreachable"); },
+      async complete() { throw new Error("unreachable"); },
+    };
+    const router = createRouter({ adapters: [backend] });
+    const [report] = await router.health();
+    expect(report).toMatchObject({ backend: "opencode", configured: true, healthy: false });
+    expect(report.reason).toContain("sidecar unreachable");
+  });
+
+  it("keeps an adapter's own unconfigured verdict when its health check resolves", async () => {
+    const backend: BackendAdapter = {
+      id: "kilo",
+      async listModels() { return []; },
+      async health() {
+        return { backend: "kilo", configured: false, healthy: false, checkedAt: new Date().toISOString(), reason: "no api key" };
+      },
+      async complete() { throw new Error("unreachable"); },
+    };
+    const router = createRouter({ adapters: [backend] });
+    const [report] = await router.health();
+    expect(report).toMatchObject({ backend: "kilo", configured: false, healthy: false });
+  });
+});
