@@ -285,8 +285,8 @@ An agent integrating Dani-Free should follow this sequence:
 | `413 request_too_large` | Request body exceeds `DANI_FREE_BODY_LIMIT_BYTES` (default 4 MiB) | Shrink the request (fewer/longer-turn messages) or raise the cap |
 | `403` | Upstream credential rejected (passed through as-is) | Check backend credentials |
 | `404` | Wrong Dani-Free route, explicit backend, or model selector | Check the exact selector; do not fall back |
-| `429` | Upstream throttling. On `auto` the router pauses briefly and fails over to the next model; on an explicit selector the refusal is returned as-is | Retry with backoff; if the model stays throttled, switch selectors or wait |
-| `5xx` | Backend failure. On `auto` the router fails over to the next model (429/408/5xx only); on an explicit selector, or once every model in the chain has failed, the refusal is returned as-is | Check backend health; on repeated failures use a different selector or wait |
+| `429` | Upstream throttling. The router pauses briefly (backoff) and fails over to the next model in the chain — on `auto` and on explicit selectors alike; a missing or unhealthy explicit model fails closed instead | The router already retried the chain; check `x-dani-free-model`, then wait or switch backends if every model stays throttled |
+| `5xx` | Backend failure. The router fails over to the next model on 408, 429, 5xx, transport errors, empty 200s, and oversized 200s — on `auto` and on explicit selectors alike; a missing or unhealthy explicit model fails closed instead | Check backend health; on repeated failures wait or use a different backend |
 | `502 backend_network_error` | Router could not complete the upstream request | Inspect backend health and endpoint |
 | `503 all_models_failed` | Every model in the failover chain failed; the body lists per-attempt reasons | Read the per-attempt reasons, then fix the backend configuration or wait |
 | `504 timeout` | Discovery or the request reached its deadline | Check request size/cancellation and the router timeout |
