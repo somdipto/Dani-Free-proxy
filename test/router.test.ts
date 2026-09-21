@@ -301,6 +301,27 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual(["a"]);
   });
 
+  it("caps the error body read when building a retryable failure reason", async () => {
+    const calls: string[] = [];
+    const big = "x".repeat(100_000);
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", primaryId)], async (request) => {
+        calls.push(request.model);
+        return new Response(big, { status: 503, statusText: "Upstream meltdown" });
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.error.code).toBe("all_models_failed");
+    const reason: string = body.attempts[0].reason;
+    expect(reason).toContain("503");
+    expect(reason).toContain("xxx");
+    expect(reason.length).toBeLessThan(10_000);
+    expect(calls).toEqual([primaryId]);
+  });
+
   it("treats HTTP 200 with empty content as a retryable failure", async () => {
     const calls: string[] = [];
     const empty = { choices: [{ message: { content: null }, finish_reason: "stop" }] };

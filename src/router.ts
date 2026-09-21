@@ -278,6 +278,38 @@ function upstreamReason(status: number, statusText: string | undefined, detail: 
   return short ? `${head}: ${short}` : head;
 }
 
+/** Max error-body bytes read for failure diagnostics; the rest is discarded. */
+const MAX_UPSTREAM_ERROR_SNIPPET_BYTES = 2_048;
+
+/**
+ * Read at most `maxBytes` of an upstream error body for the failover reason,
+ * then stop the stream. A bloated upstream error page (multi-MB gateway HTML
+ * on a 502) must not be fully buffered just to diagnose the failure.
+ */
+async function readUpstreamSnippet(response: Response, signal: AbortSignal, maxBytes = MAX_UPSTREAM_ERROR_SNIPPET_BYTES): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (bytes < maxBytes) {
+      const part = await raceWithSignal(reader.read(), signal);
+      if (part.done) break;
+      chunks.push(part.value);
+      bytes += part.value.byteLength;
+    }
+    return new TextDecoder().decode(Buffer.concat(chunks, bytes));
+  } catch {
+    // A mid-read failure (or caller abort): diagnose with nothing, like the
+    // old read-everything path which swallowed body errors the same way.
+    return "";
+  } finally {
+    // Stop pulling the rest of the body once we have the snippet.
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
+
 /** Prefer a short human detail from a typed error body over the raw message. */
 function errorBodyDetail(error: unknown): string {
   if (!isRecord(error)) return "";
@@ -790,9 +822,8 @@ export class Router {
         failures.push({
           model: selector,
           status,
-          reason: upstreamReason(status, response.statusText || undefined, await response.text().catch(() => "")),
+          reason: upstreamReason(status, response.statusText || undefined, await readUpstreamSnippet(response, signal)),
         });
-        void response.body?.cancel().catch(() => undefined);
         await this.failoverBackoff(signal);
         continue;
       }
@@ -800,9 +831,8 @@ export class Router {
         failures.push({
           model: selector,
           status,
-          reason: upstreamReason(status, response.statusText || undefined, await response.text().catch(() => "")),
+          reason: upstreamReason(status, response.statusText || undefined, await readUpstreamSnippet(response, signal)),
         });
-        void response.body?.cancel().catch(() => undefined);
         continue;
       }
       if (status >= 400) {
