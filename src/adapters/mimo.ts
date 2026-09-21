@@ -178,6 +178,42 @@ type OwnedProcess = {
 };
 
 /**
+ * Max discovery-body bytes parsed for a 200 response on /models or
+ * /provider. A 200 with an anomalously large body must not be buffered
+ * whole: discovery refetches on every cache miss, so an unbounded parse is a
+ * memory-exhaustion shape. Oversize bodies keep this adapter's
+ * soft-failure posture (listModels throws with the usual invalid-JSON
+ * reason, which the router absorbs per-backend) so the failover chain walks
+ * the remaining backends. Mirrors the kilo and opencode discovery caps.
+ */
+export const MAX_MIMO_DISCOVERY_BYTES = 1_048_576;
+
+/** Parse a JSON response body, refusing to buffer more than `maxBytes` first. */
+async function readCappedJson(response: Response, maxBytes = MAX_MIMO_DISCOVERY_BYTES): Promise<unknown> {
+  if (!response.body) throw new Error("MiMo Code discovery returned an empty response");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      // Check the cap before retaining the chunk: a single oversized chunk
+      // must trip the cap without being buffered into memory whole first.
+      if (bytes + part.value.byteLength > maxBytes) {
+        throw new Error(`MiMo Code discovery response exceeds ${maxBytes} bytes`);
+      }
+      chunks.push(part.value);
+      bytes += part.value.byteLength;
+    }
+    return JSON.parse(new TextDecoder().decode(Buffer.concat(chunks, bytes)));
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
+
+/**
  * The route and payload shapes below are from Xiaomi's official @mimo-ai/sdk
  * 0.1.14 (github.com/XiaomiMiMo/MiMo-Code, packages/sdk/js): GET /provider,
  * POST /session, POST /session/{id}/message, and DELETE /session/{id}.
@@ -310,7 +346,11 @@ export default class MimoAdapter implements BackendAdapter {
 
     let body: unknown;
     try {
-      body = await response.json();
+      // The discovery cap throws on oversize bodies before buffering: the
+      // catch below keeps the adapter's soft-failure posture (the router
+      // absorbs per-backend discovery failures) so the failover chain walks
+      // the remaining backends.
+      body = await readCappedJson(response);
     } catch {
       throw new Error("MiMo Code model discovery returned invalid JSON");
     }
@@ -345,7 +385,9 @@ export default class MimoAdapter implements BackendAdapter {
 
     let body: unknown;
     try {
-      body = await response.json();
+      // Same 1 MiB discovery cap as the /models path above: an oversized
+      // /provider body must not be buffered whole on cache misses.
+      body = await readCappedJson(response);
     } catch {
       throw new Error("MiMo OpenCode provider discovery returned invalid JSON");
     }
