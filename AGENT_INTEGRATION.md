@@ -4,11 +4,11 @@ This is the canonical guide for an AI coding agent, developer, or integration au
 
 ## 1. What Dani-Free is
 
-Dani-Free is a local OpenAI-compatible model router. The standard listener lists three OpenCode free ids, then three Kilo free ids, and pins `auto` to `opencode/muse-spark-1.3-contributor-free`. It does not retry another model on quota, timeout, or upstream failure.
+Dani-Free is a local OpenAI-compatible model router. The standard listener lists three OpenCode free ids, then three Kilo free ids. `auto` walks an OpenCode-first six-model failover chain starting at `opencode/nemotron-3-ultra-free`: a missing or unhealthy model is skipped, and a transport error, timeout, 429 (retried after a short backoff), 5xx, or an HTTP 200 with empty content fails over to the next model in the chain. A 4xx refusal from the upstream is returned to the caller as-is with an `x-dani-free-model` header naming the model that answered. If every model in the chain fails, the caller gets a 503 `all_models_failed` with per-attempt reasons.
 
 ```text
 Dani-Free standard route:
-auto → opencode/muse-spark-1.3-contributor-free
+auto → opencode/nemotron-3-ultra-free, then the OpenCode-first failover chain
 ```
 
 The agent does not need a Dani-Free plugin. It only needs support for a custom OpenAI-compatible provider.
@@ -73,9 +73,9 @@ Always call `/v1/models` and use an exact returned id.
 Supported selectors on the standard listener:
 
 ```text
-auto                                          Alias of opencode/muse-spark-1.3-contributor-free
-opencode/muse-spark-1.3-contributor-free      OpenCode slot 1
-opencode/muse-spark-1.2-contributor-free      OpenCode slot 2
+auto                                          OpenCode-first failover chain starting at opencode/nemotron-3-ultra-free
+opencode/nemotron-3-ultra-free                OpenCode slot 1 (auto starts here)
+opencode/muse-spark-1.3-contributor-free      OpenCode slot 2
 opencode/mimo-v2.5-free                       OpenCode slot 3
 kilo/nex-agi/nex-n2.5-pro:free                Kilo slot 4
 kilo/dots-studio/dots-3-note-preview:free     Kilo slot 5
