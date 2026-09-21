@@ -659,9 +659,33 @@ export class Router {
     return opencodeFirst(models.map(modelSelectorId));
   }
 
-  /** Resolve chain selectors to healthy routes, skipping anything unusable. */
+  /**
+   * Resolve chain selectors to healthy routes, skipping anything unusable.
+   * Backend discovery is pre-warmed concurrently: with an allowlist-derived
+   * chain the selectors below would otherwise discover each backend's models
+   * one after another (OpenCode's round trip, then Kilo's). modelsFor dedupes
+   * through the shared pending promise, so the loop reuses these warm results.
+   */
   private async resolveChain(signal: AbortSignal): Promise<Route[]> {
     const selectors = await this.chainSelectors(signal);
+    const backends = new Map<string, BackendAdapter>();
+    for (const selector of selectors) {
+      const parsed = modelSelector(selector);
+      if (parsed.auto || !parsed.backendId || backends.has(parsed.backendId)) continue;
+      const backend = this.findAdapter(parsed.backendId);
+      if (backend) backends.set(parsed.backendId, backend);
+    }
+    await Promise.all(
+      [...backends.values()].map(async (backend) => {
+        try {
+          await this.modelsFor(backend, signal);
+        } catch (error) {
+          // Mirror the loop below: a backend whose discovery fails is simply
+          // skipped; client cancellation still aborts the request.
+          if (isAbort(error)) throw error;
+        }
+      }),
+    );
     const routes: Route[] = [];
     const seen = new Set<string>();
     for (const selector of selectors) {

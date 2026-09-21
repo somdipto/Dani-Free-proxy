@@ -113,6 +113,46 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual(["b"]);
   });
 
+  it("discovers every chain backend concurrently instead of one round trip at a time", async () => {
+    type Gate = {
+      promise: Promise<BackendModel[]>;
+      resolve: (value: BackendModel[] | PromiseLike<BackendModel[]>) => void;
+      reject: (reason?: unknown) => void;
+    };
+    const gates: Record<string, Gate> = {
+      opencode: Promise.withResolvers<BackendModel[]>(),
+      kilo: Promise.withResolvers<BackendModel[]>(),
+    };
+    const started: BackendId[] = [];
+    const bothStarted = Promise.withResolvers<void>();
+    const backend = (id: BackendId) => {
+      const base = adapter(id, [], async () => Response.json({ ok: id }));
+      base.listModels = async () => {
+        started.push(id);
+        if (started.length === 2) bothStarted.resolve();
+        return gates[id].promise;
+      };
+      return base;
+    };
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      allowedModels: ["opencode/a", "kilo/b"],
+      adapters: [backend("opencode"), backend("kilo")],
+    });
+    const pending = router.handle(chat());
+    // Kilo's discovery must start even though OpenCode's has not resolved yet.
+    const concurrent = await Promise.race([
+      bothStarted.promise.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 250)),
+    ]);
+    expect(concurrent).toBe(true);
+    gates.opencode.resolve([model("opencode", "a")]);
+    gates.kilo.resolve([model("kilo", "b")]);
+    const response = await pending;
+    expect(await response.json()).toEqual({ ok: "opencode" });
+    expect(response.headers.get("x-dani-free-model")).toBe("opencode/a");
+  });
+
   it("fails over after a 429 and labels the model that answered", async () => {
     const calls: string[] = [];
     const router = createRouter({
