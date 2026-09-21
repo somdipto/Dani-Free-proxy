@@ -299,7 +299,11 @@ function sanitizeReason(error: unknown, fallback: string): string {
 }
 
 function upstreamReason(status: number, statusText: string | undefined, detail: string): string {
-  const head = `upstream ${status}${statusText ? ` ${statusText}` : ""}`;
+  // The status text also comes from the upstream gateway, so it gets the same
+  // redaction pass as the body: a hostile gateway can smuggle a signed URL or
+  // a leaked credential into "502 Bad Gateway?token=..." and the reason is
+  // handed back to the client.
+  const head = `upstream ${status}${statusText ? ` ${redactDiagnostics(statusText)}` : ""}`;
   const trimmed = detail.trim();
   const short = trimmed.length > 120 ? `${trimmed.slice(0, 117)}...` : trimmed;
   return short ? `${head}: ${short}` : head;
