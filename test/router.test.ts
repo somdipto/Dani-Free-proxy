@@ -225,6 +225,29 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual([primaryId, "other"]);
   });
 
+  it("redacts signed URLs and bearer tokens from upstream error snippets in failover reasons", async () => {
+    const leakedUrl = "https://upstream.example/error-page?sig=secret-signature";
+    const leakedToken = "sk-leaked-bearer-token";
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", primaryId)], async () => {
+        return new Response(
+          `<html>gateway 500; see ${leakedUrl} with Authorization: Bearer ${leakedToken}</html>`,
+          { status: 500, statusText: "Internal Server Error" },
+        );
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.error.code).toBe("all_models_failed");
+    const reason: string = body.attempts[0].reason;
+    expect(reason).toContain("[url]");
+    expect(reason).toContain("Bearer [redacted]");
+    expect(reason).not.toContain(leakedUrl);
+    expect(reason).not.toContain(leakedToken);
+  });
+
   it("passes through a non-retryable 401 without failing over", async () => {
     let calls = 0;
     const router = createRouter({

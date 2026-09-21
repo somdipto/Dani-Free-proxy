@@ -318,7 +318,10 @@ export const MAX_UPSTREAM_RESPONSE_BYTES = 8_388_608;
 /**
  * Read at most `maxBytes` of an upstream error body for the failover reason,
  * then stop the stream. A bloated upstream error page (multi-MB gateway HTML
- * on a 502) must not be fully buffered just to diagnose the failure.
+ * on a 502) must not be fully buffered just to diagnose the failure. The
+ * snippet is redacted before it reaches any failover reason: upstream error
+ * bodies can carry signed URLs or leaked credentials, and failover reasons
+ * are handed back to the client.
  */
 async function readUpstreamSnippet(response: Response, signal: AbortSignal, maxBytes = MAX_UPSTREAM_ERROR_SNIPPET_BYTES): Promise<string> {
   if (!response.body) return "";
@@ -334,7 +337,7 @@ async function readUpstreamSnippet(response: Response, signal: AbortSignal, maxB
     }
     // Enforce the byte cap exactly: one upstream chunk can be larger than
     // the cap on its own, so slice after concat rather than trusting chunk size.
-    return new TextDecoder().decode(Buffer.concat(chunks).subarray(0, maxBytes));
+    return redactDiagnostics(new TextDecoder().decode(Buffer.concat(chunks).subarray(0, maxBytes)));
   } catch {
     // A mid-read failure (or caller abort): diagnose with nothing, like the
     // old read-everything path which swallowed body errors the same way.
