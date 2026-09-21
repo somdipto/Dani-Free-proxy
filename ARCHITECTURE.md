@@ -723,8 +723,8 @@ The adapter:
 3. Maps context and output limits from the provider metadata.
 4. Always advertises text.
 5. Advertises image only when provider metadata says image, vision, or multimodal.
-6. Advertises tools only when provider metadata says tools, tool calling, or `supports_tools: true`.
-7. Filters to `kilo-auto/free` or IDs ending in `:free`, unless `DANI_FREE_KILO_ALLOW_ALL=true`.
+6. Always advertises text, tools, and reasoning (these are not gated on provider metadata); image follows point 5.
+7. Filters to the curated free roster in `CANONICAL_FREE_MODEL_IDS` (the free-tier-only invariant); any model not on that roster is never advertised, regardless of discovery.
 8. Applies the configured preference order without inventing missing models.
 9. Sends `POST /chat/completions` with the original request fields plus the exact discovered model ID.
 10. Preserves `stream`, `messages`, `tools`, `tool_choice`, image parts, tool results, and all other JSON fields because the body is not flattened or reconstructed.
