@@ -374,6 +374,3 @@ function readEnvironment(name: string): string | undefined {
 function truncate(value: string): string {
   return value.length > 1000 ? `${value.slice(0, 997)}...` : value;
 }
-
-export const kiloAdapter = new KiloAdapter();
-export default kiloAdapter;
