@@ -1,22 +1,25 @@
 import { KiloAdapter } from "./adapters/kilo";
+import { applyBackendEnvironment, loadConfig } from "./config";
 import { KILO_FREE_MODELS, createRouterServer } from "./server";
-import { envHost, envNumber } from "./env-number";
 
-const host = envHost("DANI_FREE_HOST", "127.0.0.1");
-// Same bounds as loadConfig; kilo-only.ts bypasses config validation.
-const port = envNumber("DANI_FREE_PORT", 4290, 1, 65_535);
+// The Kilo-only listener resolves the same JSON config file and environment
+// variables as the standard listener, but keeps its own defaults: port 4290
+// and a 120s request deadline. Client API-key auth is not enforced here.
+const config = loadConfig(undefined, { port: 4290, requestTimeoutMs: 120_000 });
+applyBackendEnvironment(config);
+
 const server = createRouterServer({
-  host,
-  port,
-  timeoutMs: envNumber("DANI_FREE_REQUEST_TIMEOUT_MS", 120_000, 100, 300_000),
-  maxBodyBytes: envNumber("DANI_FREE_BODY_LIMIT_BYTES", 4 * 1024 * 1024, 1_024, 100 * 1024 * 1024),
-  attemptTimeoutMs: envNumber("DANI_FREE_ATTEMPT_TIMEOUT_MS", 60_000, 5_000, 300_000),
+  host: config.host,
+  port: config.port,
+  timeoutMs: config.requestTimeoutMs,
+  maxBodyBytes: config.bodyLimitBytes,
+  attemptTimeoutMs: config.attemptTimeoutMs,
   primaryModel: KILO_FREE_MODELS[0],
   allowedModels: [...KILO_FREE_MODELS],
   adapters: [new KiloAdapter()],
 });
 
-console.log(`dani-free Kilo-only listening at http://${host}:${server.port}`);
+console.log(`dani-free Kilo-only listening at http://${config.host}:${server.port}`);
 
 const shutdown = () => server.close(true);
 process.once("SIGINT", shutdown);

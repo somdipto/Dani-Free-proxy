@@ -111,14 +111,20 @@ function mergeBackend(file: ConfigFile, id: BackendId): BackendSettings {
   return { ...DEFAULTS.backends[id], ...backendValue(legacy, `${id}`), ...backendValue(nested, `backends.${id}`) };
 }
 
+/** Per-listener default overrides for entry points that share loadConfig but bind different defaults (e.g. the Kilo-only listener). */
+export interface ConfigDefaultOverrides {
+  port?: number;
+  requestTimeoutMs?: number;
+}
+
 /** Load defaults, optional JSON config, then environment overrides. Secrets are never logged by this module. */
-export function loadConfig(configPath?: string): DaniFreeConfig {
+export function loadConfig(configPath?: string, defaults: ConfigDefaultOverrides = {}): DaniFreeConfig {
   const configuredPath = configPath ?? env("DANI_FREE_CONFIG");
   const selectedPath = resolve(configuredPath ?? DEFAULT_CONFIG_PATH);
   const file = readConfigFile(selectedPath, configuredPath !== undefined);
   const host = env("DANI_FREE_HOST") ?? stringValue(file.host, "host") ?? DEFAULTS.host;
-  const port = numberValue(env("DANI_FREE_PORT") ?? file.port, "port", 1, 65_535) ?? DEFAULTS.port;
-  const requestTimeoutMs = numberValue(env("DANI_FREE_REQUEST_TIMEOUT_MS") ?? file.requestTimeoutMs, "requestTimeoutMs", 100, 300_000) ?? DEFAULTS.requestTimeoutMs;
+  const port = numberValue(env("DANI_FREE_PORT") ?? file.port, "port", 1, 65_535) ?? defaults.port ?? DEFAULTS.port;
+  const requestTimeoutMs = numberValue(env("DANI_FREE_REQUEST_TIMEOUT_MS") ?? file.requestTimeoutMs, "requestTimeoutMs", 100, 300_000) ?? defaults.requestTimeoutMs ?? DEFAULTS.requestTimeoutMs;
   const attemptTimeoutMs = numberValue(env("DANI_FREE_ATTEMPT_TIMEOUT_MS") ?? file.attemptTimeoutMs, "attemptTimeoutMs", 5_000, 300_000) ?? DEFAULTS.attemptTimeoutMs;
   const bodyLimitBytes = numberValue(env("DANI_FREE_BODY_LIMIT_BYTES") ?? file.bodyLimitBytes, "bodyLimitBytes", 1_024, 100 * 1024 * 1024) ?? DEFAULTS.bodyLimitBytes;
   const apiKey = env("DANI_FREE_API_KEY") ?? stringValue(file.apiKey, "apiKey");
@@ -151,6 +157,22 @@ export function loadConfig(configPath?: string): DaniFreeConfig {
   }
 
   return { host, port, apiKey, requestTimeoutMs, attemptTimeoutMs, bodyLimitBytes, configPath: selectedPath, backends };
+}
+
+/** Bridge merged backend settings into the environment so adapters constructed afterwards read them. */
+export function applyBackendEnvironment(config: DaniFreeConfig): void {
+  const values = {
+    DANI_FREE_OPENCODE_BASE_URL: config.backends.opencode.baseUrl,
+    DANI_FREE_OPENCODE_API_KEY: config.backends.opencode.apiKey,
+    DANI_FREE_KILO_BASE_URL: config.backends.kilo.baseUrl,
+    DANI_FREE_KILO_API_KEY: config.backends.kilo.apiKey,
+    DANI_FREE_MIMO_BASE_URL: config.backends.mimo.baseUrl,
+    DANI_FREE_MIMO_API_KEY: config.backends.mimo.apiKey,
+    DANI_FREE_MIMO_COMMAND: config.backends.mimo.command,
+  };
+  for (const [name, value] of Object.entries(values)) {
+    if (value !== undefined) process.env[name] = value;
+  }
 }
 
 export function configDirectory(configPath = DEFAULT_CONFIG_PATH): string {

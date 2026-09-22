@@ -30,7 +30,7 @@ The router keeps a five-second model-discovery cache. The request deadline start
 | Variable | Purpose |
 | --- | --- |
 | `DANI_FREE_HOST` | Bind address; defaults to `127.0.0.1`. |
-| `DANI_FREE_PORT` | Listen port; defaults to `4190`. |
+| `DANI_FREE_PORT` | Listen port; defaults to `4190` (`4290` for the Kilo-only listener). |
 | `DANI_FREE_API_KEY` | Optional client API key. When set, clients must send `Authorization: Bearer <value>` (case-insensitive scheme) or the `x-api-key` header with the same value. |
 | `DANI_FREE_KILO_BASE_URL` | Verified Kilo Code endpoint. Defaults to `https://api.kilo.ai/api/gateway`. |
 | `DANI_FREE_KILO_API_KEY` | Kilo Code endpoint credential, if required. |
@@ -50,7 +50,7 @@ The router keeps a five-second model-discovery cache. The request deadline start
 
 Settings resolve with defaults first, then the JSON file, then environment variables: any `DANI_FREE_*` variable above overrides the same key from the file. The file accepts the flat keys `host`, `port`, `apiKey`, `requestTimeoutMs`, `attemptTimeoutMs`, `bodyLimitBytes`, plus one object per backend (`opencode`, `kilo`, `mimo` — or nested under `backends`) with `baseUrl`, `apiKey`, `command`, and `timeoutMs`.
 
-The Kilo-only listener on `:4290` advertises the three Kilo ids and walks them as a three-model failover chain on `auto`, starting at Nex Pro (not pinned to one model; the Nex Pro primary is only used for the precise 404/503 when the chain is empty).
+The Kilo-only listener on `:4290` advertises the three Kilo ids and walks them as a three-model failover chain on `auto`, starting at Nex Pro (not pinned to one model; the Nex Pro primary is only used for the precise 404/503 when the chain is empty). It resolves the same JSON config file and `DANI_FREE_*` variables as the standard listener, but keeps its own defaults (port `4290`, request deadline `120_000`); client API-key auth (`DANI_FREE_API_KEY`) is not enforced on `:4290`.
 
 ## API
 
