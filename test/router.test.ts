@@ -203,6 +203,23 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual(["a", "b"]);
   });
 
+  it("fails over on an anomalous 3xx instead of serving the redirect as the answer", async () => {
+    const calls: string[] = [];
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        if (request.model === "a") return Response.redirect("https://example.com/login", 302);
+        return Response.json({ ok: "b" });
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: "b" });
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
   it("fails over on a 408 and labels the model that answered", async () => {
     const calls: string[] = [];
     const router = createRouter({
