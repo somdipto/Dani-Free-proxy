@@ -584,6 +584,72 @@ describe("Dani-Free failover chain", () => {
     }
   });
 
+  it("honors the 429 cooldown when an upstream answers 200 with a string rate-limit code envelope", async () => {
+    // Gateways that signal rate limits with a string code
+    // ({ "error": { "code": "rate_limit_exceeded" } }) get the same 429
+    // cooldown as a numeric 429 envelope: quota/billing strings are excluded
+    // on purpose, so this test only covers rate-limit strings.
+    const time = clock();
+    let attempts = 0;
+    const envelope = { error: { message: "rate limit exceeded", code: "rate_limit_exceeded" } };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 60_000,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        attempts += 1;
+        return Response.json(request.model === "a" ? envelope : full);
+      })],
+    });
+    try {
+      let settled = false;
+      const pending = router.handle(chat()).then((response) => { settled = true; return response; });
+      // Drain without advancing any router timer: the 429-envelope backoff
+      // must still be pending, so the request must not have settled yet.
+      for (let round = 0; round < 25 && !settled; round += 1) await time.flush();
+      expect(settled).toBe(false);
+      expect(attempts).toBe(1);
+      // failoverBackoff adds up to 500ms of jitter on top of the 60s base,
+      // so advance past the jitter ceiling to fire the backoff timer.
+      await time.advance(61_000);
+      const response = await pending;
+      expect(settled).toBe(true);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(full);
+      expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+      expect(attempts).toBe(2);
+    } finally {
+      time.restore();
+    }
+  });
+
+  it("fails over immediately on a 200 envelope with a quota string code", async () => {
+    // Quota/billing strings ("insufficient_quota", "quota_exceeded") are NOT
+    // mapped to 429: a quota refusal is not a signal to wait, so the chain
+    // advances immediately like any other non-429 envelope.
+    const time = clock();
+    let settled = false;
+    const envelope = { error: { message: "not enough credit", code: "insufficient_quota" } };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 60_000,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        return Response.json(request.model === "a" ? envelope : full);
+      })],
+    });
+    try {
+      const pending = router.handle(chat()).then((response) => { settled = true; return response; });
+      // A pending backoff would never fire under the fake clock: settling here
+      // proves the chain advanced with no pause after the quota-string envelope.
+      for (let round = 0; round < 25 && !settled; round += 1) await time.flush();
+      expect(settled).toBe(true);
+      const response = await pending;
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(full);
+    } finally {
+      time.restore();
+    }
+  });
+
   it("fails over immediately on a 200 error envelope without a 429 code", async () => {
     // The 429 cooldown applies only to rate limits; any other envelope (even
     // one carrying a 503 code) advances without pausing, matching real 5xxes.
