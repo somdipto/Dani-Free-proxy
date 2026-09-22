@@ -585,6 +585,65 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual(["a", "b"]);
   });
 
+  it("fails over when an upstream answers 200 with a bare-numeric error envelope", async () => {
+    // A gateway that reports the refusal as {"error": 429} with no message
+    // and no code key is still a refusal: the envelope must fail over
+    // (with the 429 cooldown) instead of being served to the client as an
+    // answer.
+    const calls: string[] = [];
+    const envelope = { error: 429 };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        return Response.json(request.model === "a" ? envelope : full);
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(full);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("honors the 429 cooldown when an upstream answers 200 with a bare-numeric 429 envelope", async () => {
+    // The bare-numeric shorthand ({ "error": 429 }) gets the same 429
+    // cooldown as a record-carried 429 code: after the first attempt the
+    // request must NOT settle until the backoff fires.
+    const time = clock();
+    let attempts = 0;
+    const envelope = { error: 429 };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 60_000,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        attempts += 1;
+        return Response.json(request.model === "a" ? envelope : full);
+      })],
+    });
+    try {
+      let settled = false;
+      const pending = router.handle(chat()).then((response) => { settled = true; return response; });
+      // Drain without advancing any router timer: the 429-envelope backoff
+      // must still be pending, so the request must not have settled yet.
+      for (let round = 0; round < 25 && !settled; round += 1) await time.flush();
+      expect(settled).toBe(false);
+      expect(attempts).toBe(1);
+      // failoverBackoff adds up to 500ms of jitter on top of the 60s base,
+      // so advance past the jitter ceiling to fire the backoff timer.
+      await time.advance(61_000);
+      const response = await pending;
+      expect(settled).toBe(true);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(full);
+      expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+      expect(attempts).toBe(2);
+    } finally {
+      time.restore();
+    }
+  });
+
   it("fails over when an upstream answers 200 with an OpenAI error envelope", async () => {
     const calls: string[] = [];
     const envelope = { error: { message: "capacity exhausted, try again", type: "server_error" } };

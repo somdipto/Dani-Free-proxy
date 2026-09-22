@@ -501,7 +501,9 @@ function envelopeText(value: unknown): string {
  * message-less envelope is still a refusal when it carries a numeric error
  * code/status (`{ "error": { "code": 429 } }`): an envelope with a 4xx/5xx
  * code and no message text would otherwise be served to the client as a
- * successful 200, with no failover and no 429 cooldown.
+ * successful 200, with no failover and no 429 cooldown. A bare numeric
+ * entry (`{ "error": 429 }`) is the same refusal in shorthand and gets the
+ * same treatment.
  */
 function errorEnvelopeMessage(payload: unknown): string | undefined {
   if (!isRecord(payload)) return undefined;
@@ -546,7 +548,9 @@ const RATE_LIMIT_CODE_STRINGS: ReadonlySet<string> = new Set([
  * the recognized strings map to 429 so they get the same cooldown rather
  * than burning the next attempt against the still rate-limited backend. A
  * bare string entry (`{ "error": "rate_limit_exceeded" }`) naming a
- * recognized rate-limit condition maps to 429 the same way.
+ * recognized rate-limit condition maps to 429 the same way, and a bare
+ * numeric entry (`{ "error": 429 }`, or nested/inside a list) is taken as
+ * that code directly.
  */
 function envelopeStatus(payload: unknown): number | undefined {
   if (!isRecord(payload)) return undefined;
@@ -567,6 +571,13 @@ function envelopeStatus(payload: unknown): number | undefined {
     // burn the next attempt against the still rate-limited backend.
     if (typeof entry === "string") {
       if (RATE_LIMIT_CODE_STRINGS.has(entry.trim().toLowerCase())) return 429;
+      continue;
+    }
+    // A bare numeric entry (`{ "error": 429 }`, or nested/inside a list) is a
+    // gateway's shorthand for that error code; without this the envelope has
+    // no message and no code and would be served as a successful 200.
+    if (typeof entry === "number") {
+      if (Number.isInteger(entry) && entry >= 400 && entry <= 599) return entry;
       continue;
     }
     if (!isRecord(entry)) continue;
