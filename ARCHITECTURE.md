@@ -2,9 +2,9 @@
 
 **Historical launch gate (2026-09-20):** an earlier plan required both Kilo and OpenCode before launch, using public/non-sensitive data only. OpenCode explicitly prohibits free-tier use in other harnesses. See [external-access research and verified implementation defects](EXTERNAL_ACCESS_RESEARCH.md). No universal-proxy launch is authorized or verified.
 
-This document's current product is the standard listener on `127.0.0.1:4190`: three OpenCode free ids, then three Kilo free ids. `auto` starts a six-model OpenCode-first failover chain at `opencode/nemotron-3-ultra-free` (missing or unhealthy models are skipped; transport errors, 408s, 429s, 5xx, and HTTP 200 with empty content advance to the next model; a request-deadline timeout ends the chain with a 504 instead of advancing; any other 4xx refusal is passed through as-is). Later sections keep a work log of earlier Kilo-only and Kilo/MiMo routing. Treat historical sections as a work log, not release acceptance.
+This document's current product is the standard listener on `127.0.0.1:4190`: three OpenCode free ids, then three Kilo free ids. `auto` starts a six-model OpenCode-first failover chain at `opencode/nemotron-3-ultra-free` (missing or unhealthy models are skipped; transport errors, 408s, 429s, 5xx, anomalous HTTP 204/1xx/3xx responses, and HTTP 200s with empty content, invalid JSON, an error envelope, or a body exceeding the 8 MiB buffer cap advance to the next model; a request-deadline timeout ends the chain with a 504 instead of advancing; any other 4xx refusal is passed through as-is). Later sections keep a work log of earlier Kilo-only and Kilo/MiMo routing. Treat historical sections as a work log, not release acceptance.
 
-**Evidence correction:** historical sections below contain superseded current-state wording. The current `:4190` contract is OpenCode then Kilo as listed by `/v1/models`; missing or unhealthy models are skipped, and transport errors, 408s, 429s (after a brief pause), 5xx, and HTTP 200 with empty content fail over to the next model in the chain. A request-deadline timeout ends the chain with a 504 instead of advancing. Any other 4xx refusal from an upstream is returned to the caller as-is.
+**Evidence correction:** historical sections below contain superseded current-state wording. The current `:4190` contract is OpenCode then Kilo as listed by `/v1/models`; missing or unhealthy models are skipped, and transport errors, 408s, 429s (after a brief pause), 5xx, anomalous HTTP 204/1xx/3xx responses, and HTTP 200s with empty content, invalid JSON, an error envelope, or a body exceeding the 8 MiB buffer cap fail over to the next model in the chain. A request-deadline timeout ends the chain with a 504 instead of advancing. Any other 4xx refusal from an upstream is returned to the caller as-is.
 ---
 
 ## 1. Executive summary
@@ -152,7 +152,7 @@ The router resolves the explicit selector first. If that attempt fails with a re
 model: auto
 ```
 
-`auto` starts the OpenCode-first six-model failover chain at `opencode/nemotron-3-ultra-free` — not an alias: if nemotron fails, another model in the chain answers. A missing or unhealthy model is skipped; a transport error, 408, 429 (pauses briefly with backoff honoring the upstream Retry-After when present, then advances — no pause after the final attempt), 5xx, an attempt whose per-attempt deadline fired (the chain walks on immediately with an `attempt timed out` reason — the 429 cooldown only applies to rate limits), an HTTP 200 with empty content, an HTTP 200 with an invalid JSON body, an HTTP 200 carrying an error envelope, or an HTTP 200 whose body exceeds the 8 MiB buffer cap fails over to the next model. Any other 4xx refusal is returned to the caller as-is. If every model in the chain fails, the caller gets a 503 `all_models_failed` with per-attempt reasons.
+`auto` starts the OpenCode-first six-model failover chain at `opencode/nemotron-3-ultra-free` — not an alias: if nemotron fails, another model in the chain answers. A missing or unhealthy model is skipped; a transport error, 408, 429 (pauses briefly with backoff honoring the upstream Retry-After when present, then advances — no pause after the final attempt), 5xx, an anomalous HTTP 204, 1xx, or 3xx response (no content, an interim status, or a redirect — never a chat answer), an attempt whose per-attempt deadline fired (the chain walks on immediately with an `attempt timed out` reason — the 429 cooldown only applies to rate limits), an HTTP 200 with empty content, an HTTP 200 with an invalid JSON body, an HTTP 200 carrying an error envelope, or an HTTP 200 whose body exceeds the 8 MiB buffer cap fails over to the next model. Any other 4xx refusal is returned to the caller as-is. If every model in the chain fails, the caller gets a 503 `all_models_failed` with per-attempt reasons.
 
 A former work-log policy treated network errors, HTTP 429, and HTTP 5xx as retryable across a Kilo-then-MiMo candidate list, and a later Kilo-only canary pinned `auto` to one Kilo model with no second-model retry. Neither policy is current `:4190` behavior; attempt timeouts remain retryable today (they fail over to the next model immediately, with no backoff).
 
@@ -181,7 +181,7 @@ The effective timing policy is:
 | Router class fallback default | 120 seconds | used only if the server was not started through the configuration loader |
 | incoming request signal | propagated through the attempt | client cancellation is terminal and stops the attempt |
 
-There is no 30-second per-candidate retry window and no 90-second `auto` fallback budget. `auto` is the OpenCode-first six-model failover chain starting at `opencode/nemotron-3-ultra-free`; a transport error, 408, 429 (with backoff), 5xx, or an attempt-timeout (immediate failover, no backoff) fails over to the next model, and if all fail the caller gets a 503 `all_models_failed`. A per-attempt deadline bounds each attempt only up to its response headers; once a model answers, the shared request deadline (and client cancellation) stays active through streamed response EOF.
+There is no 30-second per-candidate retry window and no 90-second `auto` fallback budget. `auto` is the OpenCode-first six-model failover chain starting at `opencode/nemotron-3-ultra-free`; a transport error, 408, 429 (with backoff), 5xx, an anomalous HTTP 204/1xx/3xx response, an attempt-timeout (immediate failover, no backoff), or an HTTP 200 with empty content, invalid JSON, an error envelope, or an oversized body fails over to the next model, and if all fail the caller gets a 503 `all_models_failed`. A per-attempt deadline bounds each attempt only up to its response headers; once a model answers, the shared request deadline (and client cancellation) stays active through streamed response EOF.
 
 ### Important limit
 
@@ -361,6 +361,9 @@ MiMo adapter: configured MiMo service (not standard start)
 | `404 model_not_found` | adapter/router | explicit model absent | do not fall back |
 | `429` | provider | provider rate limit | fail over to the next model after a backoff that honors the upstream `Retry-After` header when present (clamped at 30s), plus jitter |
 | `5xx` | provider | transient upstream failure | fail over to the next model |
+| anomalous `204` / `1xx` / `3xx` | provider | no content, interim status, or redirect — never a chat answer | fail over to the next model |
+| HTTP 200 with invalid JSON body | provider | unparseable JSON body | fail over to the next model |
+| HTTP 200 carrying an error envelope | provider | `{"error": …}` envelope (object, bare-string, or string-array form) | fail over to the next model; an envelope 429 pauses like a real 429 |
 | HTTP 200 with empty content | provider | empty-content quirk | fail over to the next model |
 | HTTP 200 with oversized body | provider | body exceeds the 8 MiB buffer cap | fail over to the next model |
 | `504 timeout` | router | shared request deadline reached | return 504; remaining models are not tried |
@@ -458,7 +461,7 @@ The stack is a useful local compatibility layer, but it is not a transparent rep
 The currently correct narrow claim is:
 
 ```text
-Dani-Free's standard `:4190` listener is OpenCode-first, then Kilo; `auto` starts the six-model chain at `opencode/nemotron-3-ultra-free` and fails over across it (transport errors, 408, 429 with backoff, 5xx, empty or oversized 200s), passing other 4xx refusals through as-is.
+Dani-Free's standard `:4190` listener is OpenCode-first, then Kilo; `auto` starts the six-model chain at `opencode/nemotron-3-ultra-free` and fails over across it (transport errors, 408, 429 with backoff, 5xx, anomalous 204/1xx/3xx responses, and 200s with empty content, invalid JSON, an error envelope, or an oversized body), passing other 4xx refusals through as-is.
 ```
 
 The claim it cannot currently support is:
