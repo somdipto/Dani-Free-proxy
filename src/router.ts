@@ -462,10 +462,19 @@ function chatCompletionHasContent(payload: unknown): boolean | undefined {
   return false;
 }
 
-/** Flatten a string, an error object, or a list mixing either, to one message. */
+/** Flatten a string, an error object, or a list mixing either, to one message.
+ * Some gateways nest the refusal (`{ "error": { "errors": [{ "message": ... }] } }`),
+ * so record nodes recurse into `error`/`errors` keys as well as `message`/`detail`. */
 function envelopeText(value: unknown): string {
   if (typeof value === "string") return value.trim();
-  if (isRecord(value)) return envelopeText(value.message) || envelopeText(value.detail);
+  if (isRecord(value)) {
+    return (
+      envelopeText(value.message) ||
+      envelopeText(value.detail) ||
+      envelopeText(value.error) ||
+      envelopeText(value.errors)
+    );
+  }
   if (Array.isArray(value)) {
     return value
       .map((item) => envelopeText(item))
@@ -482,7 +491,8 @@ function envelopeText(value: unknown): string {
  * OpenAI-style envelope (`{ "error": { "message": ... } }`), others send the
  * refusal as a bare string (`{ "error": "quota exceeded" }`), as a list of
  * strings (`{ "error": ["quota exceeded", "retry later"] }`), as a list of
- * error objects (`{ "error": [{ "message": ... }] }`), or under the plural key
+ * error objects (`{ "error": [{ "message": ... }] }`), as a nested envelope
+ * (`{ "error": { "errors": [{ "message": ... }] } }`), or under the plural key
  * (`{ "errors": [{ "message": ... }] }`, the shape Google-style gateways use);
  * without this check the envelope would reach the client as a "successful" 200 and the attempt would
  * count as answered, so no failover would happen. Returns undefined for a
@@ -526,21 +536,39 @@ const RATE_LIMIT_CODE_STRINGS: ReadonlySet<string> = new Set([
 /**
  * Pull a numeric error code out of an HTTP 200 error envelope
  * (`{ "error": { "code": 429 } }`, `{ "error": { "status": 429 } }`, or the
- * same shapes under the plural `errors` key). Some gateways signal a refusal
+ * same shapes under the plural `errors` key, including nested envelopes like
+ * `{ "error": { "errors": [{ "code": 429 }] } }`). Some gateways signal a refusal
  * with a 200 plus an error envelope instead of a real error status; spotting
  * the code lets the chain treat a 429-in-envelope like any other 429 (fail
  * over with the 429 cooldown) instead of advancing immediately after a rate
  * limit. A few gateways use a rate-limit string code instead of a number —
  * either in `code` or, OpenAI-style, in `type` (`"rate_limit_error"`) — and
  * the recognized strings map to 429 so they get the same cooldown rather
- * than burning the next attempt against the still rate-limited backend.
+ * than burning the next attempt against the still rate-limited backend. A
+ * bare string entry (`{ "error": "rate_limit_exceeded" }`) naming a
+ * recognized rate-limit condition maps to 429 the same way.
  */
 function envelopeStatus(payload: unknown): number | undefined {
   if (!isRecord(payload)) return undefined;
-  const error = payload.error;
-  const errors = payload.errors;
-  const entries = [error, errors].flatMap((value) => (Array.isArray(value) ? value : [value]));
-  for (const entry of entries) {
+  // Gateways sometimes nest the refusal (`{ "error": { "errors": [{ "code": 429 }] } }`),
+  // so the scan descends into nested `error`/`errors` nodes after checking the
+  // code on each node. Payloads come from JSON.parse, so there are no
+  // reference cycles and the queue walk always terminates.
+  const queue: unknown[] = [payload.error, payload.errors];
+  for (let i = 0; i < queue.length; i += 1) {
+    const entry = queue[i];
+    if (Array.isArray(entry)) {
+      queue.push(...entry);
+      continue;
+    }
+    // A bare string (or a string inside a string array) naming a recognized
+    // rate-limit condition is a 429 like any record-carried code; without
+    // this, {"error":"rate_limit_exceeded"} would fail over immediately and
+    // burn the next attempt against the still rate-limited backend.
+    if (typeof entry === "string") {
+      if (RATE_LIMIT_CODE_STRINGS.has(entry.trim().toLowerCase())) return 429;
+      continue;
+    }
     if (!isRecord(entry)) continue;
     for (const candidate of [entry.code, entry.status, entry.type]) {
       const text =
@@ -552,6 +580,7 @@ function envelopeStatus(payload: unknown): number | undefined {
       if (Number.isInteger(parsed) && parsed >= 400 && parsed <= 599) return parsed;
       if (RATE_LIMIT_CODE_STRINGS.has(text.toLowerCase())) return 429;
     }
+    queue.push(entry.error, entry.errors);
   }
   return undefined;
 }
