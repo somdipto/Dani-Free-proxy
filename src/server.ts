@@ -21,7 +21,7 @@ export interface RouterServer {
 export const OPENCODE_FREE_MODELS = [
   "opencode/nemotron-3-ultra-free",
   "opencode/muse-spark-1.3-contributor-free",
-  "opencode/mimo-v2.5-free",
+  "opencode/mimo-v2.6-flash-free",
 ] as const;
 
 /** Kilo free ids occupy slots 4-6. */

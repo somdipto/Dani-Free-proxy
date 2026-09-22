@@ -128,7 +128,7 @@ POST /v1/chat/completions
 ```text
 opencode/nemotron-3-ultra-free
 opencode/muse-spark-1.3-contributor-free
-opencode/mimo-v2.5-free
+opencode/mimo-v2.6-flash-free
 kilo/nex-agi/nex-n2.5-pro:free
 kilo/dots-studio/dots-3-note-preview:free
 kilo/nex-agi/nex-n2.5-mini:free

@@ -78,7 +78,7 @@ Supported selectors on the standard listener:
 auto                                          OpenCode-first failover chain starting at opencode/nemotron-3-ultra-free
 opencode/nemotron-3-ultra-free                OpenCode slot 1 (auto starts here)
 opencode/muse-spark-1.3-contributor-free      OpenCode slot 2
-opencode/mimo-v2.5-free                       OpenCode slot 3
+opencode/mimo-v2.6-flash-free                       OpenCode slot 3
 kilo/nex-agi/nex-n2.5-pro:free                Kilo slot 4
 kilo/dots-studio/dots-3-note-preview:free     Kilo slot 5
 kilo/nex-agi/nex-n2.5-mini:free               Kilo slot 6
