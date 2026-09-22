@@ -464,7 +464,11 @@ function chatCompletionHasContent(payload: unknown): boolean | undefined {
 
 /** Flatten a string, an error object, or a list mixing either, to one message.
  * Some gateways nest the refusal (`{ "error": { "errors": [{ "message": ... }] } }`),
- * so record nodes recurse into `error`/`errors` keys as well as `message`/`detail`. */
+ * so record nodes recurse into `error`/`errors` keys as well as `message`/`detail`.
+ * FastAPI validation errors and some Python-style gateways carry the text
+ * under `msg` instead of `message` (`{ "detail": [{ "loc": [...], "msg": ...,
+ * "type": "missing" }] }`, `{ "error": { "msg": ... } }`), so `msg` is read
+ * as a last-resort message key after the more standard ones. */
 function envelopeText(value: unknown): string {
   if (typeof value === "string") return value.trim();
   if (isRecord(value)) {
@@ -472,7 +476,8 @@ function envelopeText(value: unknown): string {
       envelopeText(value.message) ||
       envelopeText(value.detail) ||
       envelopeText(value.error) ||
-      envelopeText(value.errors)
+      envelopeText(value.errors) ||
+      envelopeText(value.msg)
     );
   }
   if (Array.isArray(value)) {
@@ -496,7 +501,11 @@ function envelopeText(value: unknown): string {
  * (`{ "errors": [{ "message": ... }] }`, the shape Google-style gateways use),
  * or under the FastAPI-style top-level `detail` key (`{ "detail": "rate limit
  * exceeded" }`); a Python-style gateways' code key is also read (`{ "error":
- * { "status_code": 429 } }` or `statusCode`);
+ * { "status_code": 429 } }` or `statusCode`); some gateways key the message
+ * text as `msg` rather than `message` (FastAPI validation lists carry
+ * `{ "detail": [{ "loc": [...], "msg": ..., "type": "missing" }] }`, and some
+ * wrappers send `{ "error": { "msg": ... } }`) and `msg` is read as a
+ * last-resort message key;
  * without this check the envelope would reach the client as a "successful" 200 and the attempt would
  * count as answered, so no failover would happen. Returns undefined for a
  * genuine completion: a real chat completion never carries a top-level error

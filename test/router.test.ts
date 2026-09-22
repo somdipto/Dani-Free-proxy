@@ -799,6 +799,51 @@ describe("Dani-Free failover chain", () => {
     }
   });
 
+  it("fails over when an upstream answers 200 with a msg-keyed error envelope", async () => {
+    // Some gateways key the message text as `msg` instead of `message`
+    // (`{ "error": { "msg": ... } }`); envelopeText reads it as a
+    // last-resort message key, so the envelope fails over instead of being
+    // served to the client as an answer.
+    const calls: string[] = [];
+    const envelope = { error: { msg: "capacity exhausted, try again" } };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        return Response.json(request.model === "a" ? envelope : full);
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(full);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("fails over when an upstream answers 200 with a FastAPI validation-error list", async () => {
+    // FastAPI validation errors arrive as a `detail` list of error objects
+    // whose message lives under `msg`, not `message`
+    // (`{ "detail": [{ "loc": [...], "msg": ..., "type": "missing" }] }`):
+    // the joined msg texts must still count as a refusal envelope and fail
+    // over instead of being served as a successful 200.
+    const calls: string[] = [];
+    const envelope = { detail: [{ loc: ["body", "x"], msg: "field required", type: "missing" }] };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        return Response.json(request.model === "a" ? envelope : full);
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(full);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
   it("fails over when an upstream answers 200 with an OpenAI error envelope", async () => {
     const calls: string[] = [];
     const envelope = { error: { message: "capacity exhausted, try again", type: "server_error" } };
