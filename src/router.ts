@@ -486,14 +486,21 @@ function envelopeText(value: unknown): string {
  * envelope would reach the client as a "successful" 200 and the attempt would
  * count as answered, so no failover would happen. Returns undefined for a
  * genuine completion: a real chat completion never carries a top-level error
- * envelope, so a contentful answer always wins over a stray "error" key.
+ * envelope, so a contentful answer always wins over a stray "error" key. A
+ * message-less envelope is still a refusal when it carries a numeric error
+ * code/status (`{ "error": { "code": 429 } }`): an envelope with a 4xx/5xx
+ * code and no message text would otherwise be served to the client as a
+ * successful 200, with no failover and no 429 cooldown.
  */
 function errorEnvelopeMessage(payload: unknown): string | undefined {
   if (!isRecord(payload)) return undefined;
-  const message = envelopeText(payload.error);
-  if (!message) return undefined;
+  // A contentful answer always wins over a stray "error" key, whether or not
+  // the envelope carries a message.
   if (chatCompletionHasContent(payload) === true) return undefined;
-  return message;
+  const message = envelopeText(payload.error);
+  if (message) return message;
+  const status = envelopeStatus(payload);
+  return status === undefined ? undefined : `upstream error ${status}`;
 }
 
 /**

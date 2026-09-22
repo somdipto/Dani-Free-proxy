@@ -564,6 +564,27 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual(["a", "b"]);
   });
 
+  it("fails over when an upstream answers 200 with a message-less numeric-code envelope", async () => {
+    // A gateway that reports the refusal as {"error": {"code": 429}} with no
+    // message text is still a refusal: the envelope must fail over (with the
+    // 429 cooldown) instead of being served to the client as an answer.
+    const calls: string[] = [];
+    const envelope = { error: { code: 429 } };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        return Response.json(request.model === "a" ? envelope : full);
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(full);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
   it("fails over when an upstream answers 200 with an OpenAI error envelope", async () => {
     const calls: string[] = [];
     const envelope = { error: { message: "capacity exhausted, try again", type: "server_error" } };
