@@ -10,6 +10,7 @@ const server = createRouterServer({
   port,
   timeoutMs: envNumber("DANI_FREE_REQUEST_TIMEOUT_MS", 120_000, 100, 300_000),
   maxBodyBytes: envNumber("DANI_FREE_BODY_LIMIT_BYTES", 4 * 1024 * 1024, 1_024, 100 * 1024 * 1024),
+  attemptTimeoutMs: envNumber("DANI_FREE_ATTEMPT_TIMEOUT_MS", 60_000, 5_000, 300_000),
   primaryModel: KILO_FREE_MODELS[0],
   allowedModels: [...KILO_FREE_MODELS],
   adapters: [new KiloAdapter()],
