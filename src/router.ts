@@ -462,12 +462,13 @@ function chatCompletionHasContent(payload: unknown): boolean | undefined {
   return false;
 }
 
-/** Flatten a string-or-string-array error value to one message. */
+/** Flatten a string, an error object, or a list mixing either, to one message. */
 function envelopeText(value: unknown): string {
   if (typeof value === "string") return value.trim();
+  if (isRecord(value)) return envelopeText(value.message) || envelopeText(value.detail);
   if (Array.isArray(value)) {
     return value
-      .filter((item): item is string => typeof item === "string")
+      .map((item) => envelopeText(item))
       .map((item) => item.trim())
       .filter((item) => item.length > 0)
       .join("; ");
@@ -479,20 +480,17 @@ function envelopeText(value: unknown): string {
  * Extract the message from an upstream HTTP 200 body that is an error envelope
  * instead of a completion. Some gateways signal a refusal with a 200 using an
  * OpenAI-style envelope (`{ "error": { "message": ... } }`), others send the
- * refusal as a bare string (`{ "error": "quota exceeded" }`), and others as a
- * list of strings (`{ "error": ["quota exceeded", "retry later"] }`); without
- * this check the envelope would reach the client as a "successful" 200 and the
- * attempt would count as answered, so no failover would happen. Returns
- * undefined for a genuine completion: a real chat completion never carries a
- * top-level error envelope, so a contentful answer always wins over a stray
- * "error" key.
+ * refusal as a bare string (`{ "error": "quota exceeded" }`), as a list of
+ * strings (`{ "error": ["quota exceeded", "retry later"] }`), or as a list of
+ * error objects (`{ "error": [{ "message": ... }] }`); without this check the
+ * envelope would reach the client as a "successful" 200 and the attempt would
+ * count as answered, so no failover would happen. Returns undefined for a
+ * genuine completion: a real chat completion never carries a top-level error
+ * envelope, so a contentful answer always wins over a stray "error" key.
  */
 function errorEnvelopeMessage(payload: unknown): string | undefined {
   if (!isRecord(payload)) return undefined;
-  const error = payload.error;
-  const message = isRecord(error)
-    ? envelopeText(error.message) || envelopeText(error.detail)
-    : envelopeText(error);
+  const message = envelopeText(payload.error);
   if (!message) return undefined;
   if (chatCompletionHasContent(payload) === true) return undefined;
   return message;
@@ -532,16 +530,19 @@ const RATE_LIMIT_CODE_STRINGS: ReadonlySet<string> = new Set([
 function envelopeStatus(payload: unknown): number | undefined {
   if (!isRecord(payload)) return undefined;
   const error = payload.error;
-  if (!isRecord(error)) return undefined;
-  for (const candidate of [error.code, error.status, error.type]) {
-    const text =
-      typeof candidate === "number" ? String(candidate)
-      : typeof candidate === "string" ? candidate.trim()
-      : "";
-    if (text === "") continue;
-    const parsed = Number(text);
-    if (Number.isInteger(parsed) && parsed >= 400 && parsed <= 599) return parsed;
-    if (RATE_LIMIT_CODE_STRINGS.has(text.toLowerCase())) return 429;
+  const entries = Array.isArray(error) ? error : [error];
+  for (const entry of entries) {
+    if (!isRecord(entry)) continue;
+    for (const candidate of [entry.code, entry.status, entry.type]) {
+      const text =
+        typeof candidate === "number" ? String(candidate)
+        : typeof candidate === "string" ? candidate.trim()
+        : "";
+      if (text === "") continue;
+      const parsed = Number(text);
+      if (Number.isInteger(parsed) && parsed >= 400 && parsed <= 599) return parsed;
+      if (RATE_LIMIT_CODE_STRINGS.has(text.toLowerCase())) return 429;
+    }
   }
   return undefined;
 }
