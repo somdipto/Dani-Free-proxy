@@ -6,6 +6,7 @@ import type {
   ChatRequest,
 } from "./types";
 import { redactDiagnostics } from "./redact";
+import { retryAfterMs } from "./retry-after";
 
 export interface RouterOptions {
   adapters?: BackendAdapter[];
@@ -239,6 +240,18 @@ function statusFrom(error: unknown): number | undefined {
     : undefined;
 }
 
+/**
+ * Cooldown hint carried on a thrown adapter error (e.g. KiloBackendError,
+ * OpenCodeError) parsed from the upstream `Retry-After` header at throw time.
+ * Adapters that throw on non-200 never hand the router a response, so this is
+ * the only path by which a thrown 429 keeps its cooldown.
+ */
+function retryAfterFrom(error: unknown): number | undefined {
+  if (!isRecord(error)) return undefined;
+  const hint = error.retryAfterMs;
+  return typeof hint === "number" && Number.isFinite(hint) && hint > 0 ? hint : undefined;
+}
+
 function responseFromStatusError(error: unknown): Response | undefined {
   if (!isRecord(error)) return undefined;
   const status = statusFrom(error);
@@ -317,34 +330,9 @@ function upstreamReason(status: number, statusText: string | undefined, detail: 
 /** Max error-body bytes read for failure diagnostics; the rest is discarded. */
 const MAX_UPSTREAM_ERROR_SNIPPET_BYTES = 2_048;
 
-/**
- * Upper bound on the cooldown honored from an upstream `Retry-After` header on
- * a 429. Rate limits usually apply to the account/backend rather than one
- * model, so the next chain attempt is likely to hit the same limit — honoring
- * the requested cooldown beats burning an attempt on a guaranteed refusal.
- * The clamp keeps a hostile or absurd header from stalling the chain.
- */
-const MAX_RETRY_AFTER_BACKOFF_MS = 30_000;
-
-/**
- * Parse an upstream `Retry-After` header into milliseconds. Accepts both forms
- * the spec allows: delta-seconds and an HTTP date. Returns undefined when the
- * header is missing, unparseable, or non-positive. Exported for tests.
- */
-export function retryAfterMs(headers: Headers): number | undefined {
-  const raw = headers.get("retry-after")?.trim();
-  if (!raw) return undefined;
-  const seconds = Number(raw);
-  if (Number.isFinite(seconds) && seconds > 0) {
-    return Math.min(seconds * 1_000, MAX_RETRY_AFTER_BACKOFF_MS);
-  }
-  const dateMs = Date.parse(raw);
-  if (!Number.isNaN(dateMs)) {
-    const delta = dateMs - Date.now();
-    if (delta > 0) return Math.min(delta, MAX_RETRY_AFTER_BACKOFF_MS);
-  }
-  return undefined;
-}
+// Re-exported for existing callers (adapters, tests) that read it via the
+// router module.
+export { retryAfterMs } from "./retry-after";
 
 /**
  * Max upstream 200-body bytes buffered while checking for the empty-content
@@ -977,8 +965,14 @@ export class Router {
         }
         const status = statusFrom(error);
         if (status === 429) {
-          failures.push({ model: selector, status, reason: retryableStatusReason(error, status, "rate limited") });
-          if (hasNext) await this.failoverBackoff(signal);
+          const retryAfterHint = retryAfterFrom(error);
+          const reason = retryableStatusReason(error, status, "rate limited");
+          failures.push({
+            model: selector,
+            status,
+            reason: retryAfterHint !== undefined ? `${reason} (retry after ${Math.round(retryAfterHint / 1_000)}s)` : reason,
+          });
+          if (hasNext) await this.failoverBackoff(signal, retryAfterHint);
           continue;
         }
         if (status !== undefined && (status === 408 || status >= 500)) {

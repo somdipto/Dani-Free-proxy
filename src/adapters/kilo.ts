@@ -7,6 +7,7 @@ import type {
 } from "../types";
 import { redactDiagnostics } from "../redact";
 import { readCappedJson } from "./capped-json";
+import { retryAfterMs } from "../retry-after";
 
 export const KILO_DEFAULT_BASE_URL = "https://api.kilo.ai/api/gateway";
 
@@ -76,8 +77,10 @@ export class KiloBackendError extends Error {
   readonly statusText: string;
   readonly body: string;
   readonly url: string;
+  /** Upstream `Retry-After` cooldown (ms) parsed at throw time, if any. */
+  readonly retryAfterMs?: number;
 
-  constructor(url: string, status: number, statusText: string, body: string) {
+  constructor(url: string, status: number, statusText: string, body: string, retryAfterMs?: number) {
     const detail = extractErrorDetail(body);
     super(
       `Kilo gateway request failed (${status}${statusText ? ` ${statusText}` : ""})${detail ? `: ${detail}` : ""}`,
@@ -87,6 +90,7 @@ export class KiloBackendError extends Error {
     this.status = status;
     this.statusText = statusText;
     this.body = body;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -198,7 +202,7 @@ export class KiloAdapter implements BackendAdapter {
     console.error(`[kilo] ${init.method ?? "GET"} ${path} -> ${response.status} in ${Date.now() - startedAt}ms`);
     if (!response.ok) {
       const body = await readErrorSnippet(response, init.signal ?? undefined);
-      throw new KiloBackendError(url, response.status, response.statusText, body);
+      throw new KiloBackendError(url, response.status, response.statusText, body, retryAfterMs(response.headers));
     }
     return response;
   }

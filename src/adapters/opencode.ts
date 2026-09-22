@@ -7,6 +7,7 @@ import type {
   ChatRequest,
 } from "../types.ts";
 import { readCappedJson } from "./capped-json";
+import { retryAfterMs } from "../retry-after";
 
 /**
  * OpenCode backend adapter.
@@ -71,13 +72,16 @@ export class OpenCodeError extends Error {
   readonly status: number;
   readonly code: string;
   readonly type: string;
+  /** Upstream `Retry-After` cooldown (ms) parsed at throw time, if any. */
+  readonly retryAfterMs?: number;
 
-  constructor(message: string, init: { status?: number; code?: string; type?: string } = {}) {
+  constructor(message: string, init: { status?: number; code?: string; type?: string; retryAfterMs?: number } = {}) {
     super(message);
     this.name = "OpenCodeError";
     this.status = init.status ?? 502;
     this.code = init.code ?? "opencode_backend_error";
     this.type = init.type ?? "api_error";
+    this.retryAfterMs = init.retryAfterMs;
   }
 
   get body(): string {
@@ -619,7 +623,7 @@ export class OpenCodeAdapter implements BackendAdapter {
       const detail = await this.readErrorBody(response, signal);
       throw new OpenCodeError(
         `failed to create OpenCode session: HTTP ${response.status}${detail ? ` — ${detail}` : ""}`,
-        { status: response.status, code: "session_create_failed" },
+        { status: response.status, code: "session_create_failed", retryAfterMs: retryAfterMs(response.headers) },
       );
     }
     let payload: unknown;
@@ -655,7 +659,7 @@ export class OpenCodeAdapter implements BackendAdapter {
       const detail = await this.readErrorBody(response, signal);
       throw new OpenCodeError(
         `OpenCode message failed: HTTP ${response.status}${detail ? ` — ${detail}` : ""}`,
-        { status: response.status, code: "message_failed" },
+        { status: response.status, code: "message_failed", retryAfterMs: retryAfterMs(response.headers) },
       );
     }
     try {

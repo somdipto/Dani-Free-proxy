@@ -408,6 +408,20 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual([primaryId, "other"]);
   });
 
+  it("honors the Retry-After hint carried on a thrown 429 before failing over", async () => {
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", primaryId), model("kilo", "other")], async () => {
+        throw new KiloBackendError("http://upstream", 429, "Too Many Requests", '{"error":"rate limited"}', 1_000);
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.attempts).toHaveLength(2);
+    expect(body.attempts[0].reason).toContain("(retry after 1s)");
+  });
+
   it("redacts URLs and bearer tokens from typed upstream error details in failover reasons", async () => {
     const detail = `{"error": {"message": "see https://upstream.example/quota?key=abc, Bearer sk-secret-123"}}`;
     const router = createRouter({
