@@ -653,6 +653,56 @@ describe("Dani-Free failover chain", () => {
     }
   });
 
+  it("fails over when an upstream answers 200 with a plural-errors envelope", async () => {
+    const calls: string[] = [];
+    // Some gateways report the refusal under the plural `errors` key
+    // ({ "errors": [{ "message": ... }] }); it must not be served as an answer.
+    const envelope = { errors: [{ message: "capacity exhausted, try again", code: 500 }] };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        return Response.json(request.model === "a" ? envelope : full);
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(full);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("honors the 429 cooldown when the code sits inside a plural-errors envelope", async () => {
+    const time = clock();
+    let attempts = 0;
+    const envelope = { errors: [{ message: "rate limit exceeded", code: 429 }] };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 60_000,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        attempts += 1;
+        return Response.json(request.model === "a" ? envelope : full);
+      })],
+    });
+    try {
+      let settled = false;
+      const pending = router.handle(chat()).then((response) => { settled = true; return response; });
+      for (let round = 0; round < 25 && !settled; round += 1) await time.flush();
+      expect(settled).toBe(false);
+      expect(attempts).toBe(1);
+      await time.advance(61_000);
+      const response = await pending;
+      expect(settled).toBe(true);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(full);
+      expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+      expect(attempts).toBe(2);
+    } finally {
+      time.restore();
+    }
+  });
+
   it("honors the 429 cooldown when an upstream answers 200 with a 429 error envelope", async () => {
     // Fake the timers so a pending backoff stalls the request: after the first
     // attempt the request must NOT settle until the backoff fires.

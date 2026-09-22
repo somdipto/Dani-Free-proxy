@@ -481,9 +481,10 @@ function envelopeText(value: unknown): string {
  * instead of a completion. Some gateways signal a refusal with a 200 using an
  * OpenAI-style envelope (`{ "error": { "message": ... } }`), others send the
  * refusal as a bare string (`{ "error": "quota exceeded" }`), as a list of
- * strings (`{ "error": ["quota exceeded", "retry later"] }`), or as a list of
- * error objects (`{ "error": [{ "message": ... }] }`); without this check the
- * envelope would reach the client as a "successful" 200 and the attempt would
+ * strings (`{ "error": ["quota exceeded", "retry later"] }`), as a list of
+ * error objects (`{ "error": [{ "message": ... }] }`), or under the plural key
+ * (`{ "errors": [{ "message": ... }] }`, the shape Google-style gateways use);
+ * without this check the envelope would reach the client as a "successful" 200 and the attempt would
  * count as answered, so no failover would happen. Returns undefined for a
  * genuine completion: a real chat completion never carries a top-level error
  * envelope, so a contentful answer always wins over a stray "error" key. A
@@ -497,7 +498,7 @@ function errorEnvelopeMessage(payload: unknown): string | undefined {
   // A contentful answer always wins over a stray "error" key, whether or not
   // the envelope carries a message.
   if (chatCompletionHasContent(payload) === true) return undefined;
-  const message = envelopeText(payload.error);
+  const message = envelopeText(payload.error) || envelopeText(payload.errors);
   if (message) return message;
   const status = envelopeStatus(payload);
   return status === undefined ? undefined : `upstream error ${status}`;
@@ -524,20 +525,21 @@ const RATE_LIMIT_CODE_STRINGS: ReadonlySet<string> = new Set([
 
 /**
  * Pull a numeric error code out of an HTTP 200 error envelope
- * (`{ "error": { "code": 429 } }` or `{ "error": { "status": 429 } }`).
- * Some gateways signal a refusal with a 200 plus an error envelope instead of
- * a real error status; spotting the code lets the chain treat a 429-in-envelope
- * like any other 429 (fail over with the 429 cooldown) instead of advancing
- * immediately after a rate limit. A few gateways use a rate-limit string code
- * instead of a number — either in `code` or, OpenAI-style, in `type`
- * (`"rate_limit_error"`) — and the recognized strings map to 429 so they get
- * the same cooldown rather than burning the next attempt against the still
- * rate-limited backend.
+ * (`{ "error": { "code": 429 } }`, `{ "error": { "status": 429 } }`, or the
+ * same shapes under the plural `errors` key). Some gateways signal a refusal
+ * with a 200 plus an error envelope instead of a real error status; spotting
+ * the code lets the chain treat a 429-in-envelope like any other 429 (fail
+ * over with the 429 cooldown) instead of advancing immediately after a rate
+ * limit. A few gateways use a rate-limit string code instead of a number —
+ * either in `code` or, OpenAI-style, in `type` (`"rate_limit_error"`) — and
+ * the recognized strings map to 429 so they get the same cooldown rather
+ * than burning the next attempt against the still rate-limited backend.
  */
 function envelopeStatus(payload: unknown): number | undefined {
   if (!isRecord(payload)) return undefined;
   const error = payload.error;
-  const entries = Array.isArray(error) ? error : [error];
+  const errors = payload.errors;
+  const entries = [error, errors].flatMap((value) => (Array.isArray(value) ? value : [value]));
   for (const entry of entries) {
     if (!isRecord(entry)) continue;
     for (const candidate of [entry.code, entry.status, entry.type]) {
