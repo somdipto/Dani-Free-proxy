@@ -493,7 +493,9 @@ function envelopeText(value: unknown): string {
  * strings (`{ "error": ["quota exceeded", "retry later"] }`), as a list of
  * error objects (`{ "error": [{ "message": ... }] }`), as a nested envelope
  * (`{ "error": { "errors": [{ "message": ... }] } }`), or under the plural key
- * (`{ "errors": [{ "message": ... }] }`, the shape Google-style gateways use);
+ * (`{ "errors": [{ "message": ... }] }`, the shape Google-style gateways use),
+ * or under the FastAPI-style top-level `detail` key (`{ "detail": "rate limit
+ * exceeded" }`);
  * without this check the envelope would reach the client as a "successful" 200 and the attempt would
  * count as answered, so no failover would happen. Returns undefined for a
  * genuine completion: a real chat completion never carries a top-level error
@@ -510,7 +512,7 @@ function errorEnvelopeMessage(payload: unknown): string | undefined {
   // A contentful answer always wins over a stray "error" key, whether or not
   // the envelope carries a message.
   if (chatCompletionHasContent(payload) === true) return undefined;
-  const message = envelopeText(payload.error) || envelopeText(payload.errors);
+  const message = envelopeText(payload.error) || envelopeText(payload.errors) || envelopeText(payload.detail);
   if (message) return message;
   const status = envelopeStatus(payload);
   return status === undefined ? undefined : `upstream error ${status}`;
@@ -538,7 +540,8 @@ const RATE_LIMIT_CODE_STRINGS: ReadonlySet<string> = new Set([
 /**
  * Pull a numeric error code out of an HTTP 200 error envelope
  * (`{ "error": { "code": 429 } }`, `{ "error": { "status": 429 } }`, or the
- * same shapes under the plural `errors` key, including nested envelopes like
+ * same shapes under the plural `errors` key or the FastAPI-style `detail`
+ * key, including nested envelopes like
  * `{ "error": { "errors": [{ "code": 429 }] } }`). Some gateways signal a refusal
  * with a 200 plus an error envelope instead of a real error status; spotting
  * the code lets the chain treat a 429-in-envelope like any other 429 (fail
@@ -558,7 +561,7 @@ function envelopeStatus(payload: unknown): number | undefined {
   // so the scan descends into nested `error`/`errors` nodes after checking the
   // code on each node. Payloads come from JSON.parse, so there are no
   // reference cycles and the queue walk always terminates.
-  const queue: unknown[] = [payload.error, payload.errors];
+  const queue: unknown[] = [payload.error, payload.errors, payload.detail];
   for (let i = 0; i < queue.length; i += 1) {
     const entry = queue[i];
     if (Array.isArray(entry)) {
