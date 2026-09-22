@@ -800,7 +800,14 @@ request arrives
 
 An explicit `kilo/<model-id>` selector does not silently move to another backend. The Kilo-only service has no other backend to use.
 
-A former shared-router `auto` budget of 90 seconds and next-candidate retry is work-log history. Current `auto` is one pinned Kilo model. The Kilo-only happy path completed well below that old budget; a future hardening pass should add a Kilo-specific first-byte/idle-stream policy instead of relying only on a total operation timeout.
+A former shared-router `auto` budget of 90 seconds and next-candidate retry is work-log history. At canary time (2026-09-20) `auto` was one pinned Kilo model; the Kilo-only happy path completed well below that old budget, and a future hardening pass should add a Kilo-specific first-byte/idle-stream policy instead of relying only on a total operation timeout.
+
+> Superseded (2026-09-22): `src/kilo-only.ts` now passes all three Kilo ids as
+> `allowedModels` with no `modelChain`, so `auto` walks the three-model Kilo
+> failover chain (Nex Pro → Dots preview → Nex Mini) and 429 / 5xx /
+> attempt-timeout fail over like the standard listener. The Nex Pro primary is
+> only used for the precise 404/503 when the chain is empty. The pinned-model
+> flow diagram above describes the 2026-09-20 canary state, not current behavior.
 
 ### 17.7 Native streaming evidence
 
