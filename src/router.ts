@@ -958,9 +958,11 @@ export class Router {
         if (signal.aborted) throw error;
         if (isAbort(error)) {
           // Only this attempt's deadline fired: the backend hung. Record it
-          // and walk to the next model instead of failing the request.
+          // and walk to the next model immediately. The failover backoff is
+          // a 429 cooldown (honoring the upstream Retry-After); a hung
+          // backend gave no rate-limit signal, so pausing here would only
+          // delay the chain after the attempt already burned its deadline.
           failures.push({ model: selector, reason: "attempt timed out" });
-          if (hasNext) await this.failoverBackoff(signal);
           continue;
         }
         const status = statusFrom(error);

@@ -113,7 +113,7 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual(["b"]);
   });
 
-  it("fails over when a backend hangs past the per-attempt deadline", async () => {
+  it("fails over when a backend hangs past the per-attempt deadline, with no failover backoff after the timeout", async () => {
     const time = clock();
     try {
       const calls: string[] = [];
@@ -121,16 +121,22 @@ describe("Dani-Free failover chain", () => {
       const router = createRouter({
         timeoutMs: 10_000,
         attemptTimeoutMs: 100,
-        failoverBackoffMs: 1,
+        // A backoff this large would stall the request under the fake clock
+        // if it were scheduled after the timed-out attempt: the request must
+        // settle from the 100ms attempt timer alone.
+        failoverBackoffMs: 60_000,
         adapters: [
           adapter("opencode", [model("opencode", "a")], async () => { calls.push("opencode"); return hang.promise; }),
           adapter("kilo", [model("kilo", "b")], async () => { calls.push("kilo"); return Response.json({ ok: "kilo" }); }),
         ],
       });
-      const pending = router.handle(chat("auto"));
+      let settled = false;
+      const pending = router.handle(chat("auto")).then((response) => { settled = true; return response; });
       await time.flush();
-      // Fires the 100ms attempt timer and the 1ms failover backoff after it.
+      // Fires the 100ms attempt timer; no backoff timer may be pending after it.
       await time.advance(1000);
+      for (let round = 0; round < 25 && !settled; round += 1) await time.flush();
+      expect(settled).toBe(true);
       const response = await pending;
       expect(response.status).toBe(200);
       expect(await response.json()).toEqual({ ok: "kilo" });
