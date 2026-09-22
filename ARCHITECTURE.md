@@ -359,7 +359,7 @@ MiMo adapter: configured MiMo service (not standard start)
 | `401` | Dani-Free | local API key mismatch | reject request |
 | `413` | Dani-Free | request body exceeds the body cap (4 MiB via `dani-free start`; `DANI_FREE_BODY_LIMIT_BYTES` to change; 1 MiB router-library default) | reject request |
 | `404 model_not_found` | adapter/router | explicit model absent | do not fall back |
-| `429` | provider | provider rate limit | fail over to the next model after a ~1s backoff |
+| `429` | provider | provider rate limit | fail over to the next model after a backoff that honors the upstream `Retry-After` header when present (clamped at 30s), plus jitter |
 | `5xx` | provider | transient upstream failure | fail over to the next model |
 | HTTP 200 with empty content | provider | empty-content quirk | fail over to the next model |
 | HTTP 200 with oversized body | provider | body exceeds the 8 MiB buffer cap | fail over to the next model |
