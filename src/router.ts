@@ -499,6 +499,15 @@ function errorEnvelopeMessage(payload: unknown): string | undefined {
   return message;
 }
 
+/**
+ * Append the "(retry after Ns)" cooldown note to a 429 failover reason when
+ * the upstream gave a Retry-After hint. Shared by the thrown-error and the
+ * response paths so the wording cannot drift between them.
+ */
+function withRetryAfterNote(reason: string, hintMs: number | undefined): string {
+  return hintMs !== undefined ? `${reason} (retry after ${Math.round(hintMs / 1_000)}s)` : reason;
+}
+
 interface AttemptFailure {
   model: string;
   reason: string;
@@ -972,7 +981,7 @@ export class Router {
           failures.push({
             model: selector,
             status,
-            reason: retryAfterHint !== undefined ? `${reason} (retry after ${Math.round(retryAfterHint / 1_000)}s)` : reason,
+            reason: withRetryAfterNote(reason, retryAfterHint),
           });
           if (hasNext) await this.failoverBackoff(signal, retryAfterHint);
           continue;
@@ -1000,7 +1009,7 @@ export class Router {
         failures.push({
           model: selector,
           status,
-          reason: retryAfter !== undefined ? `${reason} (retry after ${Math.round(retryAfter / 1_000)}s)` : reason,
+          reason: withRetryAfterNote(reason, retryAfter),
         });
         if (hasNext) await this.failoverBackoff(signal, retryAfter);
         continue;
