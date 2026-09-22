@@ -167,7 +167,7 @@ The standard listener uses the OpenCode HTTP adapter plus Kilo. MiMo environment
 
 ### Kilo Code
 
-Kilo ids use Kilo's gateway. Configure `DANI_FREE_KILO_API_KEY` before starting the router. `:4290` is Kilo-only and pins `auto` to Nex Pro.
+Kilo ids use Kilo's gateway. Configure `DANI_FREE_KILO_API_KEY` before starting the router. `:4290` is Kilo-only and walks the three-model Kilo failover chain on `auto`, starting at Nex Pro — not pinned to one model (the Nex Pro primary is only used for the precise 404/503 when the chain is empty).
 
 ### OpenCode
 
