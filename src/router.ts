@@ -1072,10 +1072,10 @@ export class Router {
       if (status >= 400) {
         return withModelHeader(response, selector);
       }
-      if (status < 200 || status >= 300) {
-        // 1xx and 3xx are never chat answers: a gateway that hands back a
-        // redirect, an interim status, or no content is anomalous, so fail over
-        // instead of serving it to the client as a successful answer.
+      if (status === 204 || status < 200 || status >= 300) {
+        // 204, 1xx, and 3xx are never chat answers: a gateway that hands back
+        // no content, an interim status, or a redirect is anomalous, so fail
+        // over instead of serving it to the client as a successful answer.
         failures.push({
           model: selector,
           status,
