@@ -50,7 +50,7 @@ The router keeps a five-second model-discovery cache. The request deadline start
 
 Settings resolve with defaults first, then the JSON file, then environment variables: any `DANI_FREE_*` variable above overrides the same key from the file. The file accepts the flat keys `host`, `port`, `apiKey`, `requestTimeoutMs`, `attemptTimeoutMs`, `bodyLimitBytes`, plus one object per backend (`opencode`, `kilo`, `mimo` — or nested under `backends`) with `baseUrl`, `apiKey`, `command`, and `timeoutMs`.
 
-The Kilo-only listener on `:4290` advertises the three Kilo ids and pins `auto` to Nex Pro.
+The Kilo-only listener on `:4290` advertises the three Kilo ids and walks them as a three-model failover chain on `auto`, starting at Nex Pro (not pinned to one model; the Nex Pro primary is only used for the precise 404/503 when the chain is empty).
 
 ## API
 

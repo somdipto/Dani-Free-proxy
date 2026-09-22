@@ -9,7 +9,7 @@ This document's current product is the standard listener on `127.0.0.1:4190`: th
 
 ## 1. Executive summary
 
-Dani-Free is a local OpenAI-compatible router on `127.0.0.1:4190`. `auto` starts the six-model OpenCode-first failover chain at `opencode/nemotron-3-ultra-free`. `:4290` is Kilo-only with `auto` → Nex Pro.
+Dani-Free is a local OpenAI-compatible router on `127.0.0.1:4190`. `auto` starts the six-model OpenCode-first failover chain at `opencode/nemotron-3-ultra-free`. `:4290` is Kilo-only: `auto` walks the three-model Kilo failover chain starting at `kilo/nex-agi/nex-n2.5-pro:free`, not pinned to one model (the Nex Pro primary is only used for the precise 404/503 when the chain is empty).
 
 The external legacy OpenCode proxy, when separately configured, is a distinct service on `127.0.0.1:4187` with its own `opencode serve` child on port `4188`. Dani-Free does not own that service, its agent loop, or its tool policy.
 

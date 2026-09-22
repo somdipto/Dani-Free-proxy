@@ -133,4 +133,28 @@ describe("Dani-Free standard server", () => {
       server.close(true);
     }
   });
+
+  it("walks the three-model Kilo chain on auto instead of pinning to the primary (Kilo-only listener shape)", async () => {
+    // Mirrors src/kilo-only.ts: primaryModel is KILO_FREE_MODELS[0] but auto
+    // must still fail over across all three Kilo ids. The primary only feeds
+    // the precise 404/503 when the chain is empty.
+    const server = createRouterServer({
+      host: "127.0.0.1",
+      port: 0,
+      primaryModel: KILO_FREE_MODELS[0],
+      allowedModels: [...KILO_FREE_MODELS],
+      adapters: [adapter("kilo", KILO_FREE_MODELS.map((id) => model("kilo", id.slice("kilo/".length))), async () => {
+        return new Response("nope", { status: 500 });
+      })],
+    });
+    const base = `http://127.0.0.1:${server.port}`;
+    try {
+      const response = await fetch(`${base}/v1/chat/completions`, chat());
+      expect(response.status).toBe(503);
+      const payload = await response.json();
+      expect(payload.attempts.map((attempt: { model: string }) => attempt.model)).toEqual([...KILO_FREE_MODELS]);
+    } finally {
+      server.close(true);
+    }
+  });
 });
