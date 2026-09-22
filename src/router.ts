@@ -566,17 +566,18 @@ const RATE_LIMIT_CODE_STRINGS: ReadonlySet<string> = new Set([
  * bare string entry (`{ "error": "rate_limit_exceeded" }`) naming a
  * recognized rate-limit condition maps to 429 the same way, and a bare
  * numeric entry (`{ "error": 429 }`, or nested/inside a list) is taken as
- * that code directly. The descent also reaches nested `msg` nodes, so a
- * gateway that keys its refusal text as `msg` rather than `message`
- * (`{ "error": { "msg": "rate_limit_exceeded" } }`) gets the 429 cooldown
+ * that code directly. The descent also reaches nested `msg` and `message`
+ * nodes, so a gateway that keys its refusal text as `msg` or `message`
+ * (`{ "error": { "msg": "rate_limit_exceeded" } }` or
+ * `{ "error": { "message": "rate_limit_exceeded" } }`) gets the 429 cooldown
  * just like a bare-string error entry instead of failing over immediately.
  */
 function envelopeStatus(payload: unknown): number | undefined {
   if (!isRecord(payload)) return undefined;
   // Gateways sometimes nest the refusal (`{ "error": { "errors": [{ "code": 429 }] } }`),
-  // so the scan descends into nested `error`/`errors`/`detail` nodes after checking the
-  // code on each node. Payloads come from JSON.parse, so there are no
-  // reference cycles and the queue walk always terminates.
+  // so the scan descends into nested `error`/`errors`/`detail`/`msg`/`message`
+  // nodes after checking the code on each node. Payloads come from JSON.parse,
+  // so there are no reference cycles and the queue walk always terminates.
   const queue: unknown[] = [payload.error, payload.errors, payload.detail];
   for (let i = 0; i < queue.length; i += 1) {
     const entry = queue[i];
@@ -613,13 +614,14 @@ function envelopeStatus(payload: unknown): number | undefined {
       if (RATE_LIMIT_CODE_STRINGS.has(text.toLowerCase())) return 429;
     }
     // A record node can itself be a FastAPI-style refusal carried under
-    // `detail`, and a gateway that keys its refusal text as `msg` nests the
-    // refusal under that key, so the descent scans nested `error`, `errors`,
-    // `detail`, and `msg` nodes alike: `{ "error": { "detail": {
-    // "status_code": 429 } } }` and `{ "error": { "msg":
-    // "rate_limit_exceeded" } }` must reach the 429 cooldown just like a
-    // top-level `detail` key.
-    queue.push(entry.error, entry.errors, entry.detail, entry.msg);
+    // `detail`, and a gateway can key its refusal text as `msg` or `message`,
+    // so the descent scans nested `error`, `errors`, `detail`, `msg`, and
+    // `message` nodes alike: `{ "error": { "detail": { "status_code": 429 } } }`
+    // and `{ "error": { "message": "rate_limit_exceeded" } }` must reach the
+    // 429 cooldown just like a top-level `detail` key. Only exact recognized
+    // rate-limit strings map to 429 (the bare-string entry check below), so
+    // ordinary prose under `message` is unaffected.
+    queue.push(entry.error, entry.errors, entry.detail, entry.msg, entry.message);
   }
   return undefined;
 }
