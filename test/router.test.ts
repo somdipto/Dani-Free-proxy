@@ -1,6 +1,6 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { KiloBackendError } from "../src/adapters/kilo";
-import { createRouter, DEFAULT_PRIMARY_MODEL, MAX_UPSTREAM_RESPONSE_BYTES } from "../src/router";
+import { createRouter, DEFAULT_PRIMARY_MODEL, MAX_UPSTREAM_RESPONSE_BYTES, retryAfterMs } from "../src/router";
 import type { BackendAdapter, BackendId, BackendModel, ChatRequest } from "../src/types";
 
 function model(backend: BackendId, id: string): BackendModel {
@@ -1109,5 +1109,35 @@ describe("Dani-Free health reporting", () => {
     expect(report.reason ?? "").toContain("Bearer [redacted]");
     expect(report.reason ?? "").not.toContain("secret");
     expect(report.reason ?? "").not.toContain("abc123token");
+  });
+});
+
+describe("retryAfterMs", () => {
+  it("parses delta-seconds", () => {
+    expect(retryAfterMs(new Headers({ "retry-after": "5" }))).toBe(5_000);
+  });
+
+  it("trims whitespace around delta-seconds", () => {
+    expect(retryAfterMs(new Headers({ "retry-after": "  7 " }))).toBe(7_000);
+  });
+
+  it("clamps an absurd delta-seconds cooldown at 30s so a hostile header cannot stall the chain", () => {
+    expect(retryAfterMs(new Headers({ "retry-after": "120" }))).toBe(30_000);
+  });
+
+  it("parses an HTTP-date in the future, clamped at 30s", () => {
+    const near = retryAfterMs(new Headers({ "retry-after": new Date(Date.now() + 10_000).toUTCString() }));
+    expect(near).toBeGreaterThan(8_000);
+    expect(near).toBeLessThanOrEqual(10_000);
+    const far = retryAfterMs(new Headers({ "retry-after": new Date(Date.now() + 600_000).toUTCString() }));
+    expect(far).toBe(30_000);
+  });
+
+  it("returns undefined for a missing, unparseable, zero, negative, or past-due header", () => {
+    expect(retryAfterMs(new Headers())).toBeUndefined();
+    expect(retryAfterMs(new Headers({ "retry-after": "soon" }))).toBeUndefined();
+    expect(retryAfterMs(new Headers({ "retry-after": "0" }))).toBeUndefined();
+    expect(retryAfterMs(new Headers({ "retry-after": "-3" }))).toBeUndefined();
+    expect(retryAfterMs(new Headers({ "retry-after": new Date(Date.now() - 60_000).toUTCString() }))).toBeUndefined();
   });
 });
