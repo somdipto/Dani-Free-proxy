@@ -181,7 +181,7 @@ The effective timing policy is:
 | Router class fallback default | 120 seconds | used only if the server was not started through the configuration loader |
 | incoming request signal | propagated through the attempt | client cancellation is terminal and stops the attempt |
 
-There is no 30-second per-candidate retry window and no 90-second `auto` fallback budget. `auto` is the OpenCode-first six-model failover chain starting at `opencode/nemotron-3-ultra-free`; a transport error, 408, 429 (with backoff), or 5xx fails over to the next model, and if all fail the caller gets a 503 `all_models_failed`. Attempt deadlines remain active through streamed response EOF.
+There is no 30-second per-candidate retry window and no 90-second `auto` fallback budget. `auto` is the OpenCode-first six-model failover chain starting at `opencode/nemotron-3-ultra-free`; a transport error, 408, 429 (with backoff), or 5xx fails over to the next model, and if all fail the caller gets a 503 `all_models_failed`. A per-attempt deadline bounds each attempt only up to its response headers; once a model answers, the shared request deadline (and client cancellation) stays active through streamed response EOF.
 
 ### Important limit
 
@@ -416,7 +416,7 @@ Use this checklist before claiming this stack is high quality:
 - [ ] Standard `auto` starts the six-model OpenCode-first failover chain at `opencode/nemotron-3-ultra-free` and fails over on retryable failures.
 - [ ] Requested capabilities are checked before candidate selection.
 - [ ] `auto` is one attempt; missing, unhealthy, 429, 503, and timeout return that error.
-- [ ] Attempt deadlines remain active through streamed response EOF and cancellation is propagated.
+- [ ] The shared request deadline and client cancellation stay active through streamed response EOF; per-attempt deadlines bound each attempt only up to its response headers.
 - [ ] Explicit selectors fail closed and upstream statuses are preserved.
 - [ ] OpenCode remains an explicit legacy compatibility boundary, not an automatic fallback or official ACP bridge.
 - [ ] The external OpenCode proxy tool restrictions are either accepted by design or removed with a security review.
