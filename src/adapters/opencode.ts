@@ -741,5 +741,3 @@ export class OpenCodeAdapter implements BackendAdapter {
   }
 }
 
-export const openCodeAdapter = new OpenCodeAdapter();
-export default openCodeAdapter;
