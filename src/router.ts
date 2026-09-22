@@ -499,6 +499,30 @@ function errorEnvelopeMessage(payload: unknown): string | undefined {
 }
 
 /**
+ * Pull a numeric error code out of an HTTP 200 error envelope
+ * (`{ "error": { "code": 429 } }` or `{ "error": { "status": 429 } }`).
+ * Some gateways signal a refusal with a 200 plus an error envelope instead of
+ * a real error status; spotting the code lets the chain treat a 429-in-envelope
+ * like any other 429 (fail over with the 429 cooldown) instead of advancing
+ * immediately after a rate limit.
+ */
+function envelopeStatus(payload: unknown): number | undefined {
+  if (!isRecord(payload)) return undefined;
+  const error = payload.error;
+  if (!isRecord(error)) return undefined;
+  for (const candidate of [error.code, error.status]) {
+    const text =
+      typeof candidate === "number" ? String(candidate)
+      : typeof candidate === "string" ? candidate.trim()
+      : "";
+    if (text === "") continue;
+    const parsed = Number(text);
+    if (Number.isInteger(parsed) && parsed >= 400 && parsed <= 599) return parsed;
+  }
+  return undefined;
+}
+
+/**
  * Append the "(retry after Ns)" cooldown note to a 429 failover reason when
  * the upstream gave a Retry-After hint. Shared by the thrown-error and the
  * response paths so the wording cannot drift between them.
@@ -1067,11 +1091,19 @@ export class Router {
           // an answer: fail over like any other retryable upstream failure.
           // The message gets the same redaction pass as other failover
           // reasons, since failover reasons are handed back to the client in
-          // the final 503.
+          // the final 503. An envelope whose error code is 429 gets the same
+          // 429 cooldown as a real 429 response; without it the chain would
+          // advance immediately after a rate limit.
+          const rateLimited = envelopeStatus(payload) === 429;
+          const retryAfter = rateLimited ? retryAfterMs(response.headers) : undefined;
           failures.push({
             model: selector,
-            reason: upstreamReason(200, undefined, redactDiagnostics(envelopeError)),
+            reason: withRetryAfterNote(
+              upstreamReason(200, undefined, redactDiagnostics(envelopeError)),
+              retryAfter,
+            ),
           });
+          if (rateLimited && hasNext) await this.failoverBackoff(signal, retryAfter);
           continue;
         }
         const content = chatCompletionHasContent(payload);
