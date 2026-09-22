@@ -969,7 +969,9 @@ export class Router {
   /**
    * Walk the chain until one model returns a real answer.
    * Retryable: network errors, upstream timeouts (including HTTP 408), 429, 5xx,
-   * and HTTP 200 with an error envelope, invalid JSON, empty/no text content,
+   * anomalous 204/1xx/3xx responses (no content, an interim status, or a
+   * redirect — never a chat answer), and HTTP 200 with an error envelope,
+   * invalid JSON, empty/no text content,
    * or a body exceeding the MAX_UPSTREAM_RESPONSE_BYTES buffer cap. Never fails over after response bytes
    * have been emitted to the client. Each attempt gets its own deadline
    * (attemptTimeoutMs): a hung backend is abandoned and the chain walks on
