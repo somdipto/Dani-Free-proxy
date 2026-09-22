@@ -499,12 +499,32 @@ function errorEnvelopeMessage(payload: unknown): string | undefined {
 }
 
 /**
+ * Error-code strings some gateways use for rate limits instead of a numeric
+ * code (`{ "error": { "code": "rate_limit_exceeded" } }`). Only explicit
+ * rate-limit signals map to 429: quota/billing strings (e.g.
+ * "insufficient_quota", "quota_exceeded") stay unmapped because a quota
+ * refusal is not a signal to wait before retrying — it still fails over
+ * immediately like any other non-429 envelope.
+ */
+const RATE_LIMIT_CODE_STRINGS: ReadonlySet<string> = new Set([
+  "rate_limit_exceeded",
+  "rate_limited",
+  "rate-limit-exceeded",
+  "too_many_requests",
+  "too-many-requests",
+  "throttled",
+]);
+
+/**
  * Pull a numeric error code out of an HTTP 200 error envelope
  * (`{ "error": { "code": 429 } }` or `{ "error": { "status": 429 } }`).
  * Some gateways signal a refusal with a 200 plus an error envelope instead of
  * a real error status; spotting the code lets the chain treat a 429-in-envelope
  * like any other 429 (fail over with the 429 cooldown) instead of advancing
- * immediately after a rate limit.
+ * immediately after a rate limit. A few gateways use a rate-limit string code
+ * instead of a number; the recognized strings above map to 429 so they get the
+ * same cooldown rather than burning the next attempt against the still
+ * rate-limited backend.
  */
 function envelopeStatus(payload: unknown): number | undefined {
   if (!isRecord(payload)) return undefined;
@@ -518,6 +538,7 @@ function envelopeStatus(payload: unknown): number | undefined {
     if (text === "") continue;
     const parsed = Number(text);
     if (Number.isInteger(parsed) && parsed >= 400 && parsed <= 599) return parsed;
+    if (RATE_LIMIT_CODE_STRINGS.has(text.toLowerCase())) return 429;
   }
   return undefined;
 }
