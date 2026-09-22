@@ -646,6 +646,42 @@ describe("Dani-Free failover chain", () => {
     }
   });
 
+  it("honors the 429 cooldown when a detail-key envelope is nested inside error", async () => {
+    // A gateway that wraps a FastAPI-style refusal inside an OpenAI-style
+    // envelope ({ "error": { "detail": { "status_code": 429 } } }) carries
+    // the code one level down. The status scan must descend into nested
+    // `detail` nodes the same way it descends into nested `error`/`errors`
+    // nodes; otherwise the message-less envelope is served as a successful
+    // 200 with no failover and no 429 cooldown.
+    const time = clock();
+    let attempts = 0;
+    const envelope = { error: { detail: { status_code: 429 } } };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 60_000,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        attempts += 1;
+        return Response.json(request.model === "a" ? envelope : full);
+      })],
+    });
+    try {
+      let settled = false;
+      const pending = router.handle(chat()).then((response) => { settled = true; return response; });
+      for (let round = 0; round < 25 && !settled; round += 1) await time.flush();
+      expect(settled).toBe(false);
+      expect(attempts).toBe(1);
+      await time.advance(61_000);
+      const response = await pending;
+      expect(settled).toBe(true);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(full);
+      expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+      expect(attempts).toBe(2);
+    } finally {
+      time.restore();
+    }
+  });
+
   it("fails over on a message-less status_code 429 envelope instead of serving it as a 200", async () => {
     // Without a `status_code` scan, { "error": { "status_code": 429 } } has
     // no message text and no recognized code: it would be served to the

@@ -544,7 +544,9 @@ const RATE_LIMIT_CODE_STRINGS: ReadonlySet<string> = new Set([
  * Python-style `{ "error": { "status_code": 429 } }`/`{ "error": {
  * "statusCode": 429 } }`, or the same shapes under the plural `errors` key
  * or the FastAPI-style `detail` key, including nested envelopes like
- * `{ "error": { "errors": [{ "code": 429 }] } }`). Some gateways signal a refusal
+ * `{ "error": { "errors": [{ "code": 429 }] } }` or `{ "error": { "detail":
+ * { "status_code": 429 } } }` (the descent reaches nested `detail` nodes
+ * the same way it reaches nested `error`/`errors` nodes). Some gateways signal a refusal
  * with a 200 plus an error envelope instead of a real error status; spotting
  * the code lets the chain treat a 429-in-envelope like any other 429 (fail
  * over with the 429 cooldown) instead of advancing immediately after a rate
@@ -560,7 +562,7 @@ const RATE_LIMIT_CODE_STRINGS: ReadonlySet<string> = new Set([
 function envelopeStatus(payload: unknown): number | undefined {
   if (!isRecord(payload)) return undefined;
   // Gateways sometimes nest the refusal (`{ "error": { "errors": [{ "code": 429 }] } }`),
-  // so the scan descends into nested `error`/`errors` nodes after checking the
+  // so the scan descends into nested `error`/`errors`/`detail` nodes after checking the
   // code on each node. Payloads come from JSON.parse, so there are no
   // reference cycles and the queue walk always terminates.
   const queue: unknown[] = [payload.error, payload.errors, payload.detail];
@@ -598,7 +600,11 @@ function envelopeStatus(payload: unknown): number | undefined {
       if (Number.isInteger(parsed) && parsed >= 400 && parsed <= 599) return parsed;
       if (RATE_LIMIT_CODE_STRINGS.has(text.toLowerCase())) return 429;
     }
-    queue.push(entry.error, entry.errors);
+    // A record node can itself be a FastAPI-style refusal carried under
+    // `detail`, so the descent scans nested `error`, `errors`, and `detail`
+    // nodes alike: `{ "error": { "detail": { "status_code": 429 } } }` must
+    // reach the 429 cooldown just like a top-level `detail` key.
+    queue.push(entry.error, entry.errors, entry.detail);
   }
   return undefined;
 }
