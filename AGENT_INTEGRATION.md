@@ -322,6 +322,6 @@ Before declaring an agent integration complete:
 - [ ] Authentication is tested if enabled.
 - [ ] Streaming behavior and cancellation are tested before enabling them by default.
 - [ ] Existing provider config was merged, not overwritten.
-- [ ] Failures stay on the pinned model; no silent backend switch.
+- [ ] Failover is visible, not silent: every answer carries `x-dani-free-model` naming the model that actually answered — verify which backend served the request instead of assuming the requested one stayed fixed.
 - [ ] Secrets are absent from logs, docs, and commits.
 - [ ] Backend-specific failures remain visible.
