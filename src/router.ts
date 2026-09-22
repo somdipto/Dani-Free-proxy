@@ -318,6 +318,35 @@ function upstreamReason(status: number, statusText: string | undefined, detail: 
 const MAX_UPSTREAM_ERROR_SNIPPET_BYTES = 2_048;
 
 /**
+ * Upper bound on the cooldown honored from an upstream `Retry-After` header on
+ * a 429. Rate limits usually apply to the account/backend rather than one
+ * model, so the next chain attempt is likely to hit the same limit — honoring
+ * the requested cooldown beats burning an attempt on a guaranteed refusal.
+ * The clamp keeps a hostile or absurd header from stalling the chain.
+ */
+const MAX_RETRY_AFTER_BACKOFF_MS = 30_000;
+
+/**
+ * Parse an upstream `Retry-After` header into milliseconds. Accepts both forms
+ * the spec allows: delta-seconds and an HTTP date. Returns undefined when the
+ * header is missing, unparseable, or non-positive. Exported for tests.
+ */
+export function retryAfterMs(headers: Headers): number | undefined {
+  const raw = headers.get("retry-after")?.trim();
+  if (!raw) return undefined;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return Math.min(seconds * 1_000, MAX_RETRY_AFTER_BACKOFF_MS);
+  }
+  const dateMs = Date.parse(raw);
+  if (!Number.isNaN(dateMs)) {
+    const delta = dateMs - Date.now();
+    if (delta > 0) return Math.min(delta, MAX_RETRY_AFTER_BACKOFF_MS);
+  }
+  return undefined;
+}
+
+/**
  * Max upstream 200-body bytes buffered while checking for the empty-content
  * quirk. A real chat-completion payload is small; an anomalous multi-MB
  * body must fail over instead of being buffered into memory whole.
@@ -869,8 +898,11 @@ export class Router {
     return routes;
   }
 
-  private async failoverBackoff(signal: AbortSignal): Promise<void> {
-    const base = this.failoverBackoffMs;
+  private async failoverBackoff(signal: AbortSignal, retryAfterHintMs?: number): Promise<void> {
+    // An upstream-requested cooldown wins over the fixed base: the next
+    // attempt usually targets the same rate-limited backend, so waiting what
+    // it asked for beats burning an attempt on a guaranteed refusal.
+    const base = Math.max(this.failoverBackoffMs, retryAfterHintMs ?? 0);
     if (!(base > 0)) return;
     const delay = base + Math.random() * Math.min(500, base);
     await new Promise<void>((resolve, reject) => {
@@ -967,12 +999,14 @@ export class Router {
 
       const status = response.status;
       if (status === 429) {
+        const retryAfter = retryAfterMs(response.headers);
+        const reason = upstreamReason(status, response.statusText || undefined, await readUpstreamSnippet(response, signal));
         failures.push({
           model: selector,
           status,
-          reason: upstreamReason(status, response.statusText || undefined, await readUpstreamSnippet(response, signal)),
+          reason: retryAfter !== undefined ? `${reason} (retry after ${Math.round(retryAfter / 1_000)}s)` : reason,
         });
-        if (hasNext) await this.failoverBackoff(signal);
+        if (hasNext) await this.failoverBackoff(signal, retryAfter);
         continue;
       }
       if (status === 408 || status >= 500) {
