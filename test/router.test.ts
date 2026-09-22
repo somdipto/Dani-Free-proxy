@@ -622,6 +622,45 @@ describe("Dani-Free failover chain", () => {
     }
   });
 
+  it("honors the 429 cooldown when an upstream answers 200 with a rate_limit_error type envelope", async () => {
+    // Gateways that signal rate limits only through the OpenAI-style `type`
+    // field ({ "error": { "type": "rate_limit_error" } }) get the same 429
+    // cooldown as a numeric or string code in `code`: without it the chain
+    // would advance immediately and burn the next attempt against the still
+    // rate-limited backend.
+    const time = clock();
+    let attempts = 0;
+    const envelope = { error: { message: "rate limit exceeded", type: "rate_limit_error" } };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 60_000,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        attempts += 1;
+        return Response.json(request.model === "a" ? envelope : full);
+      })],
+    });
+    try {
+      let settled = false;
+      const pending = router.handle(chat()).then((response) => { settled = true; return response; });
+      // Drain without advancing any router timer: the 429-envelope backoff
+      // must still be pending, so the request must not have settled yet.
+      for (let round = 0; round < 25 && !settled; round += 1) await time.flush();
+      expect(settled).toBe(false);
+      expect(attempts).toBe(1);
+      // failoverBackoff adds up to 500ms of jitter on top of the 60s base,
+      // so advance past the jitter ceiling to fire the backoff timer.
+      await time.advance(61_000);
+      const response = await pending;
+      expect(settled).toBe(true);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(full);
+      expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+      expect(attempts).toBe(2);
+    } finally {
+      time.restore();
+    }
+  });
+
   it("fails over immediately on a 200 envelope with a quota string code", async () => {
     // Quota/billing strings ("insufficient_quota", "quota_exceeded") are NOT
     // mapped to 429: a quota refusal is not a signal to wait, so the chain

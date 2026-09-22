@@ -499,8 +499,9 @@ function errorEnvelopeMessage(payload: unknown): string | undefined {
 }
 
 /**
- * Error-code strings some gateways use for rate limits instead of a numeric
- * code (`{ "error": { "code": "rate_limit_exceeded" } }`). Only explicit
+ * Rate-limit refusal strings some gateways use instead of a numeric code
+ * (`{ "error": { "code": "rate_limit_exceeded" } }` or, OpenAI-style,
+ * `{ "error": { "type": "rate_limit_error" } }`). Only explicit
  * rate-limit signals map to 429: quota/billing strings (e.g.
  * "insufficient_quota", "quota_exceeded") stay unmapped because a quota
  * refusal is not a signal to wait before retrying — it still fails over
@@ -510,6 +511,7 @@ const RATE_LIMIT_CODE_STRINGS: ReadonlySet<string> = new Set([
   "rate_limit_exceeded",
   "rate_limited",
   "rate-limit-exceeded",
+  "rate_limit_error",
   "too_many_requests",
   "too-many-requests",
   "throttled",
@@ -522,15 +524,16 @@ const RATE_LIMIT_CODE_STRINGS: ReadonlySet<string> = new Set([
  * a real error status; spotting the code lets the chain treat a 429-in-envelope
  * like any other 429 (fail over with the 429 cooldown) instead of advancing
  * immediately after a rate limit. A few gateways use a rate-limit string code
- * instead of a number; the recognized strings above map to 429 so they get the
- * same cooldown rather than burning the next attempt against the still
+ * instead of a number — either in `code` or, OpenAI-style, in `type`
+ * (`"rate_limit_error"`) — and the recognized strings map to 429 so they get
+ * the same cooldown rather than burning the next attempt against the still
  * rate-limited backend.
  */
 function envelopeStatus(payload: unknown): number | undefined {
   if (!isRecord(payload)) return undefined;
   const error = payload.error;
   if (!isRecord(error)) return undefined;
-  for (const candidate of [error.code, error.status]) {
+  for (const candidate of [error.code, error.status, error.type]) {
     const text =
       typeof candidate === "number" ? String(candidate)
       : typeof candidate === "string" ? candidate.trim()
@@ -1112,9 +1115,9 @@ export class Router {
           // an answer: fail over like any other retryable upstream failure.
           // The message gets the same redaction pass as other failover
           // reasons, since failover reasons are handed back to the client in
-          // the final 503. An envelope whose error code is 429 gets the same
-          // 429 cooldown as a real 429 response; without it the chain would
-          // advance immediately after a rate limit.
+          // the final 503. An envelope whose error code, status, or type is 429 gets
+          // the same 429 cooldown as a real 429 response; without it the chain
+          // would advance immediately after a rate limit.
           const rateLimited = envelopeStatus(payload) === 429;
           const retryAfter = rateLimited ? retryAfterMs(response.headers) : undefined;
           failures.push({
