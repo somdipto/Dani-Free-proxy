@@ -495,7 +495,8 @@ function envelopeText(value: unknown): string {
  * (`{ "error": { "errors": [{ "message": ... }] } }`), or under the plural key
  * (`{ "errors": [{ "message": ... }] }`, the shape Google-style gateways use),
  * or under the FastAPI-style top-level `detail` key (`{ "detail": "rate limit
- * exceeded" }`);
+ * exceeded" }`); a Python-style gateways' code key is also read (`{ "error":
+ * { "status_code": 429 } }` or `statusCode`);
  * without this check the envelope would reach the client as a "successful" 200 and the attempt would
  * count as answered, so no failover would happen. Returns undefined for a
  * genuine completion: a real chat completion never carries a top-level error
@@ -540,8 +541,9 @@ const RATE_LIMIT_CODE_STRINGS: ReadonlySet<string> = new Set([
 /**
  * Pull a numeric error code out of an HTTP 200 error envelope
  * (`{ "error": { "code": 429 } }`, `{ "error": { "status": 429 } }`, or the
- * same shapes under the plural `errors` key or the FastAPI-style `detail`
- * key, including nested envelopes like
+ * Python-style `{ "error": { "status_code": 429 } }`/`{ "error": {
+ * "statusCode": 429 } }`, or the same shapes under the plural `errors` key
+ * or the FastAPI-style `detail` key, including nested envelopes like
  * `{ "error": { "errors": [{ "code": 429 }] } }`). Some gateways signal a refusal
  * with a 200 plus an error envelope instead of a real error status; spotting
  * the code lets the chain treat a 429-in-envelope like any other 429 (fail
@@ -584,7 +586,9 @@ function envelopeStatus(payload: unknown): number | undefined {
       continue;
     }
     if (!isRecord(entry)) continue;
-    for (const candidate of [entry.code, entry.status, entry.type]) {
+    // Python-style gateways carry the code as `status_code` (or camelCase
+    // `statusCode`) rather than `code`/`status`; those scan the same way.
+    for (const candidate of [entry.code, entry.status, entry.type, entry.status_code, entry.statusCode]) {
       const text =
         typeof candidate === "number" ? String(candidate)
         : typeof candidate === "string" ? candidate.trim()
