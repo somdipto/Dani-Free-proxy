@@ -48,7 +48,7 @@ The router keeps a five-second model-discovery cache. The request deadline start
 | `DANI_FREE_ATTEMPT_TIMEOUT_MS` | Per-attempt deadline in milliseconds for one model in the failover chain; a hung backend is abandoned after this long and the chain walks to the next model. Defaults to 60_000 and is clamped to the overall request deadline; must be an integer between 5_000 and 300_000. |
 | `DANI_FREE_CONFIG` | Optional JSON config file path. Defaults to `~/.config/dani-free/config.json` when it exists; a missing file is only an error when this variable names it explicitly. |
 
-Settings resolve with defaults first, then the JSON file, then environment variables: any `DANI_FREE_*` variable above overrides the same key from the file. The file accepts the flat keys `host`, `port`, `apiKey`, `requestTimeoutMs`, `bodyLimitBytes`, plus one object per backend (`opencode`, `kilo`, `mimo` — or nested under `backends`) with `baseUrl`, `apiKey`, `command`, and `timeoutMs`.
+Settings resolve with defaults first, then the JSON file, then environment variables: any `DANI_FREE_*` variable above overrides the same key from the file. The file accepts the flat keys `host`, `port`, `apiKey`, `requestTimeoutMs`, `attemptTimeoutMs`, `bodyLimitBytes`, plus one object per backend (`opencode`, `kilo`, `mimo` — or nested under `backends`) with `baseUrl`, `apiKey`, `command`, and `timeoutMs`.
 
 The Kilo-only listener on `:4290` advertises the three Kilo ids and pins `auto` to Nex Pro.
 
