@@ -1659,6 +1659,31 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toBe(1);
   });
 
+  it("fails over on a 200 SSE stream served with a nonstandard content-type", async () => {
+    // Deliberate boundary: a 200 SSE stream served with a nonstandard
+    // content-type (e.g. text/plain instead of text/event-stream) cannot be
+    // classified as a chat answer, so it fails over like any other
+    // non-completion body rather than relaying. A missing content-type still
+    // relays (see the test above).
+    const calls: string[] = [];
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        if (request.model === "a") {
+          return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/plain" } });
+        }
+        return Response.json(full);
+      })],
+    });
+    const response = await router.handle(chat("auto", { stream: true }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(full);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
   it("reports the joined array-envelope message in the final 503", async () => {
     const router = createRouter({
       failoverBackoffMs: 1,
