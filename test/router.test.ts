@@ -1465,6 +1465,29 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual(["a", "b"]);
   });
 
+  it("fails over when an upstream answers 200 with a present-but-malformed choices key", async () => {
+    // Some gateways answer 200 with `{"choices": null}` on a backend error:
+    // the body carries a choices key but no valid completion, so it must fail
+    // over like empty content instead of reaching the client as a
+    // choice-less "successful" 200. A body with no choices key at all stays
+    // opaque (pass-through), unchanged.
+    const calls: string[] = [];
+    const broken = { choices: null };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        return Response.json(request.model === "a" ? broken : full);
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(full);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
   it("fails over on a streaming request when an upstream answers 200 with empty content", async () => {
     const calls: string[] = [];
     const empty = { choices: [{ message: { content: "   " }, finish_reason: "stop" }] };

@@ -438,13 +438,17 @@ function retryableStatusReason(error: unknown, status: number, fallback: string)
 
 /**
  * True when a parsed JSON body carries real answer text (or tool calls),
- * false when it is an empty chat completion (the Kilo empty-content quirk),
- * undefined when it is not a chat-completion shape at all (opaque: pass through).
+ * false when it is an empty chat completion (the Kilo empty-content quirk)
+ * or carries a `choices` key that is not a valid completion list
+ * (`{"choices": null}` — some gateways answer 200 with that on a backend
+ * error; serving it as a successful 200 would hand the client a choice-less
+ * "answer" with no failover), undefined when it carries no `choices` key at
+ * all (opaque: pass through, the envelope scan decides).
  */
 function chatCompletionHasContent(payload: unknown): boolean | undefined {
   if (!isRecord(payload)) return undefined;
   const choices = payload.choices;
-  if (!Array.isArray(choices)) return undefined;
+  if (!Array.isArray(choices)) return "choices" in payload ? false : undefined;
   if (choices.length === 0) return false;
   const choice = choices[0];
   if (!isRecord(choice)) return false;
