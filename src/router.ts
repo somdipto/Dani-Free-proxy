@@ -634,7 +634,7 @@ function envelopeStatus(payload: unknown): number | undefined {
     // `message` nodes alike: `{ "error": { "detail": { "status_code": 429 } } }`
     // and `{ "error": { "message": "rate_limit_exceeded" } }` must reach the
     // 429 cooldown just like a top-level `detail` key. Only exact recognized
-    // rate-limit strings map to 429 (the bare-string entry check below), so
+    // rate-limit strings map to 429 (the bare-string entry check above), so
     // ordinary prose under `message` is unaffected.
     queue.push(entry.error, entry.errors, entry.detail, entry.msg, entry.message);
   }
