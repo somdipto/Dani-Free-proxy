@@ -29,6 +29,11 @@ fi
 cd "$DEST"
 sh ./install.sh
 
+if [ ! -f .env ]; then
+  cp .env.example .env
+  printf '%s\n' 'Created .env from .env.example — edit it to add your keys.'
+fi
+
 printf '\n%s\n' '✓ Done. Start the proxy with:'
 printf '%s\n' "  dani-free start"
 printf '%s\n' 'Then point your agent at: http://127.0.0.1:4190/v1'
