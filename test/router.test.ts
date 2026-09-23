@@ -646,6 +646,45 @@ describe("Dani-Free failover chain", () => {
     }
   });
 
+  it("honors the 429 cooldown when an upstream answers 200 with a camelCase statusCode-key 429 envelope", async () => {
+    // Python-style gateways also carry the code as camelCase `statusCode`
+    // instead of snake_case `status_code`; the envelope must get the same
+    // 429 cooldown as a record-carried 429 code, and a message-less
+    // `{ "error": { "statusCode": 429 } }` must fail over instead of being
+    // served to the client as a successful 200.
+    const time = clock();
+    let attempts = 0;
+    const envelope = { error: { statusCode: 429, message: "too many requests" } };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 60_000,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        attempts += 1;
+        return Response.json(request.model === "a" ? envelope : full);
+      })],
+    });
+    try {
+      let settled = false;
+      const pending = router.handle(chat()).then((response) => { settled = true; return response; });
+      // Drain without advancing any router timer: the 429-envelope backoff
+      // must still be pending, so the request must not have settled yet.
+      for (let round = 0; round < 25 && !settled; round += 1) await time.flush();
+      expect(settled).toBe(false);
+      expect(attempts).toBe(1);
+      // failoverBackoff adds up to 500ms of jitter on top of the 60s base,
+      // so advance past the jitter ceiling to fire the backoff timer.
+      await time.advance(61_000);
+      const response = await pending;
+      expect(settled).toBe(true);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(full);
+      expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+      expect(attempts).toBe(2);
+    } finally {
+      time.restore();
+    }
+  });
+
   it("honors the 429 cooldown when a detail-key envelope is nested inside error", async () => {
     // A gateway that wraps a FastAPI-style refusal inside an OpenAI-style
     // envelope ({ "error": { "detail": { "status_code": 429 } } }) carries
