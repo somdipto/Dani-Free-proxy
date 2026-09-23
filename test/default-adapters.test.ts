@@ -26,6 +26,6 @@ describe("default adapters", () => {
 
     expect(exitCode).toBe(0);
     expect(stderr).toBe("");
-    expect(stdout.trim()).toBe("http://fixture.invalid/v1/models");
+    expect(stdout.trim()).toBe("http://fixture.invalid/v1/config/providers");
   });
 });
