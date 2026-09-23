@@ -15,6 +15,13 @@ command -v bun >/dev/null 2>&1 || {
   cd "$ROOT"
   bun install --frozen-lockfile
 )
+
+if [ ! -f "$ROOT/.env" ] && [ -f "$ROOT/.env.example" ]; then
+  cp "$ROOT/.env.example" "$ROOT/.env"
+  chmod 600 "$ROOT/.env"
+  printf '%s\n' "Created $ROOT/.env from .env.example (mode 600)"
+fi
+
 mkdir -p "$BIN_DIR" "$OMP_SKILLS_DIR" "$OPENCODE_SKILLS_DIR"
 
 cat > "$BIN_DIR/dani-free" <<EOF

@@ -8,7 +8,7 @@ Use this skill to configure and operate the Dani-Free package; the package itsel
 ## Start
 
 1. Install Bun (1.1 or newer) and ensure each selected backend is installed and configured.
-2. From a checkout, run `./install.sh`, or run `bun install` and `bun run start`.
+2. From a checkout, run `./install.sh`, or run `bun install` and `bun run start`. No checkout yet: run `curl -fsSL https://raw.githubusercontent.com/somdipto/Dani-Free-proxy/main/bootstrap.sh | bash` (installs Bun if missing, clones, runs the full setup).
 3. Check `GET /health` and `GET /v1/models`.
 4. Send a minimal non-streaming request to `POST /v1/chat/completions` before enabling advanced features.
 

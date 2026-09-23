@@ -8,13 +8,19 @@ Dani-Free is a small Bun/TypeScript local OpenAI-compatible router.
 curl -fsSL https://raw.githubusercontent.com/somdipto/Dani-Free-proxy/main/bootstrap.sh | bash
 ```
 
-Installs Bun if needed, clones the repo, and runs the full setup. Then:
+Installs Bun if needed, clones the repo, creates `.env` from `.env.example` (mode 600, only if missing), and runs the full setup. Then:
 
 ```sh
 dani-free start
 ```
 
 Point your agent at `http://127.0.0.1:4190/v1` with model `auto`.
+
+### Paste-this prompt (any harness)
+
+Give this block to any agent (Hermes, OMP, OpenCode, Composio, Agent Mail, a plain coding agent):
+
+> Run `curl -fsSL https://raw.githubusercontent.com/somdipto/Dani-Free-proxy/main/bootstrap.sh | bash`. Then start the proxy with `dani-free start` (add `export PATH="$HOME/.local/bin:$PATH"` first if the command is not found). Point your OpenAI-compatible client at base URL `http://127.0.0.1:4190/v1` with model `auto`. Verify with `curl -fsS http://127.0.0.1:4190/health` and `curl -fsS http://127.0.0.1:4190/v1/models`. Never commit `.env` or any API key. If a backend credential is missing, report the error — never substitute a paid model.
 
 ---
 
