@@ -363,7 +363,7 @@ MiMo adapter: configured MiMo service (not standard start)
 | `5xx` | provider | transient upstream failure | fail over to the next model |
 | anomalous `204` / `1xx` / `3xx` | provider | no content, interim status, or redirect — never a chat answer | fail over to the next model |
 | HTTP 200 with invalid JSON body | provider | unparseable JSON body | fail over to the next model |
-| HTTP 200 carrying an error envelope | provider | `{"error": …}` envelope (object, bare-string, string-array, list-of-error-objects, message-less numeric-code, bare-numeric, nested-envelope, plural-`errors`-key, Python-style `status_code`-key, or FastAPI-style `detail`-key, or nested-`detail`-key form, `msg`-keyed form, or top-level-`msg`-keyed form; a recognized rate-limit string keyed as `msg` or `message` (nested or top-level) counts too) | fail over to the next model; an envelope 429 pauses like a real 429 |
+| HTTP 200 carrying an error envelope | provider | `{"error": …}` envelope (object, bare-string, string-array, list-of-error-objects, message-less numeric-code, bare-numeric, nested-envelope, plural-`errors`-key, Python-style `status_code`-key, or FastAPI-style `detail`-key, or nested-`detail`-key form, `msg`-keyed form, or top-level-`msg`-keyed form, or top-level-`message`-keyed form; a recognized rate-limit string keyed as `msg` or `message` (nested or top-level) counts too) | fail over to the next model; an envelope 429 pauses like a real 429 |
 | HTTP 200 with empty content | provider | empty-content quirk | fail over to the next model |
 | HTTP 200 with oversized body | provider | body exceeds the 8 MiB buffer cap | fail over to the next model |
 | `504 timeout` | router | shared request deadline reached | return 504; remaining models are not tried |

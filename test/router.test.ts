@@ -959,6 +959,68 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual(["a", "b"]);
   });
 
+  it("honors the 429 cooldown when an upstream answers 200 with a top-level message rate-limit envelope", async () => {
+    // A gateway that carries the whole refusal as a top-level `message` key
+    // (`{ "message": "rate_limit_exceeded" }`) names a recognized rate-limit
+    // condition: like the top-level `msg`-keyed form it must get the 429
+    // cooldown instead of advancing immediately after the rate limit — and
+    // unlike today it must not be served to the client as a successful 200.
+    const time = clock();
+    let attempts = 0;
+    const envelope = { message: "rate_limit_exceeded" };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 60_000,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        attempts += 1;
+        return Response.json(request.model === "a" ? envelope : full);
+      })],
+    });
+    try {
+      let settled = false;
+      const pending = router.handle(chat()).then((response) => { settled = true; return response; });
+      // Drain without advancing any router timer: the 429-envelope backoff
+      // must still be pending, so the request must not have settled yet.
+      for (let round = 0; round < 25 && !settled; round += 1) await time.flush();
+      expect(settled).toBe(false);
+      expect(attempts).toBe(1);
+      // failoverBackoff adds up to 500ms of jitter on top of the 60s base,
+      // so advance past the jitter ceiling to fire the backoff timer.
+      await time.advance(61_000);
+      const response = await pending;
+      expect(settled).toBe(true);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(full);
+      expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+      expect(attempts).toBe(2);
+    } finally {
+      time.restore();
+    }
+  });
+
+  it("fails over when an upstream answers 200 with a top-level message error envelope", async () => {
+    // Some gateways carry the whole refusal as a top-level `message` key
+    // instead of `error`/`errors`/`detail`/`msg`
+    // (`{ "message": "capacity exhausted, try again" }`): with no `choices`
+    // the body is opaque, so without a top-level `message` scan it would be
+    // served to the client as a successful 200 instead of failing over.
+    const calls: string[] = [];
+    const envelope = { message: "capacity exhausted, try again" };
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        return Response.json(request.model === "a" ? envelope : full);
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(full);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
   it("fails over when an upstream answers 200 with a FastAPI validation-error list", async () => {
     // FastAPI validation errors arrive as a `detail` list of error objects
     // whose message lives under `msg`, not `message`
