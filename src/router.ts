@@ -505,7 +505,9 @@ function envelopeText(value: unknown): string {
  * text as `msg` rather than `message` (FastAPI validation lists carry
  * `{ "detail": [{ "loc": [...], "msg": ..., "type": "missing" }] }`, and some
  * wrappers send `{ "error": { "msg": ... } }`) and `msg` is read as a
- * last-resort message key;
+ * last-resort message key; some gateways key the whole refusal as a
+ * top-level `msg` (`{ "msg": "capacity exhausted, try again" }`), which is
+ * read last for the same reason;
  * without this check the envelope would reach the client as a "successful" 200 and the attempt would
  * count as answered, so no failover would happen. Returns undefined for a
  * genuine completion: a real chat completion never carries a top-level error
@@ -522,7 +524,15 @@ function errorEnvelopeMessage(payload: unknown): string | undefined {
   // A contentful answer always wins over a stray "error" key, whether or not
   // the envelope carries a message.
   if (chatCompletionHasContent(payload) === true) return undefined;
-  const message = envelopeText(payload.error) || envelopeText(payload.errors) || envelopeText(payload.detail);
+  // Some gateways carry the whole refusal as a top-level `msg` key instead
+  // of `error`/`errors`/`detail` (`{ "msg": "..." }`): without the last
+  // `msg` scan the body is opaque (no `choices`), so it would be served to
+  // the client as a successful 200 instead of failing over.
+  const message =
+    envelopeText(payload.error) ||
+    envelopeText(payload.errors) ||
+    envelopeText(payload.detail) ||
+    envelopeText(payload.msg);
   if (message) return message;
   const status = envelopeStatus(payload);
   return status === undefined ? undefined : `upstream error ${status}`;
@@ -566,7 +576,9 @@ const RATE_LIMIT_CODE_STRINGS: ReadonlySet<string> = new Set([
  * bare string entry (`{ "error": "rate_limit_exceeded" }`) naming a
  * recognized rate-limit condition maps to 429 the same way, and a bare
  * numeric entry (`{ "error": 429 }`, or nested/inside a list) is taken as
- * that code directly. The descent also reaches nested `msg` and `message`
+ * that code directly. The scan seed also covers a top-level `msg` key, so a
+ * gateway that carries the whole refusal as `{ "msg": "rate_limit_exceeded" }`
+ * still gets the 429 cooldown. The descent also reaches nested `msg` and `message`
  * nodes, so a gateway that keys its refusal text as `msg` or `message`
  * (`{ "error": { "msg": "rate_limit_exceeded" } }` or
  * `{ "error": { "message": "rate_limit_exceeded" } }`) gets the 429 cooldown
@@ -578,7 +590,10 @@ function envelopeStatus(payload: unknown): number | undefined {
   // so the scan descends into nested `error`/`errors`/`detail`/`msg`/`message`
   // nodes after checking the code on each node. Payloads come from JSON.parse,
   // so there are no reference cycles and the queue walk always terminates.
-  const queue: unknown[] = [payload.error, payload.errors, payload.detail];
+  // A gateway that keys its whole refusal as a top-level `msg` instead of
+  // `error`/`errors`/`detail` (`{ "msg": "rate_limit_exceeded" }`) is
+  // included from the seed, so the 429 cooldown still applies there.
+  const queue: unknown[] = [payload.error, payload.errors, payload.detail, payload.msg];
   for (let i = 0; i < queue.length; i += 1) {
     const entry = queue[i];
     if (Array.isArray(entry)) {
