@@ -593,6 +593,14 @@ const RATE_LIMIT_CODE_STRINGS: ReadonlySet<string> = new Set([
  * (`{ "error": { "msg": "rate_limit_exceeded" } }` or
  * `{ "error": { "message": "rate_limit_exceeded" } }`) gets the 429 cooldown
  * just like a bare-string error entry instead of failing over immediately.
+ * The seed also includes the payload record itself, so a gateway that keys
+ * the refusal code on the envelope's top level (`{ "code": 429 }`, or
+ * top-level `status`/`status_code`/`statusCode`, or a rate-limit string in
+ * top-level `type`) gets the 429 cooldown the same way instead of being
+ * served to the client as a successful 200. A genuine completion is
+ * unaffected: errorEnvelopeMessage returns before the status scan whenever
+ * the payload carries contentful choices, and real completions never carry
+ * a top-level 4xx/5xx code or rate-limit type string.
  */
 function envelopeStatus(payload: unknown): number | undefined {
   if (!isRecord(payload)) return undefined;
@@ -603,8 +611,14 @@ function envelopeStatus(payload: unknown): number | undefined {
   // A gateway that keys its whole refusal as a top-level `message` or `msg`
   // instead of `error`/`errors`/`detail`
   // (`{ "message": "rate_limit_exceeded" }`, `{ "msg": "rate_limit_exceeded" }`)
-  // is included from the seed, so the 429 cooldown still applies there.
-  const queue: unknown[] = [payload.message, payload.error, payload.errors, payload.detail, payload.msg];
+  // is included from the seed, so the 429 cooldown still applies there. The
+  // payload record itself is also seeded, so a top-level numeric `code` (or
+  // `status`/`status_code`/`statusCode`, or a rate-limit string in `type`)
+  // is seen the same way as one nested under `error`: `{ "code": 429 }`
+  // would otherwise be served to the client as a successful 200 with no
+  // failover and no cooldown. Entries already in the seed are reached twice
+  // via the payload's own descent, which is harmless.
+  const queue: unknown[] = [payload, payload.message, payload.error, payload.errors, payload.detail, payload.msg];
   for (let i = 0; i < queue.length; i += 1) {
     const entry = queue[i];
     if (Array.isArray(entry)) {
