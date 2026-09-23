@@ -1272,6 +1272,19 @@ export class Router {
         headers.set(ANSWERED_MODEL_HEADER, selector);
         return new Response(text, { status: response.status, statusText: response.statusText, headers });
       }
+      // A 2xx whose body is neither JSON nor an SSE stream is not a chat
+      // answer: gateways sometimes hand back an HTML error page (WAF blocks,
+      // captive portals, misconfigured proxies) with a 200, and relaying it
+      // would mark the attempt as answered. A missing content-type cannot be
+      // classified, so it still relays; a present-but-wrong one fails over.
+      const mediaType = (response.headers.get("content-type") ?? "").toLowerCase();
+      if (mediaType !== "" && !mediaType.includes("json") && !mediaType.includes("text/event-stream")) {
+        failures.push({
+          model: selector,
+          reason: `upstream returned ${status} with a non-completion body (content-type: ${response.headers.get("content-type")})`,
+        });
+        continue;
+      }
       return withModelHeader(response, selector);
     }
     return allModelsFailedResponse(failures);

@@ -1608,6 +1608,57 @@ describe("Dani-Free failover chain", () => {
     expect(calls).toEqual(["a", "b"]);
   });
 
+  it("fails over when an upstream answers 200 with an HTML error page", async () => {
+    const calls: string[] = [];
+    const full = { choices: [{ message: { content: "real answer" }, finish_reason: "stop" }] };
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a"), model("kilo", "b")], async (request) => {
+        calls.push(request.model);
+        if (request.model === "a") {
+          return new Response("<html><body>Attention Required</body></html>", {
+            headers: { "content-type": "text/html; charset=utf-8" },
+          });
+        }
+        return Response.json(full);
+      })],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(full);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/b");
+    expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("reports the non-completion body in the final 503", async () => {
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a")], async () =>
+        new Response("<html><body>blocked</body></html>", { headers: { "content-type": "text/html" } }))],
+    });
+    const response = await router.handle(chat());
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.attempts[0].reason).toContain("non-completion body");
+  });
+
+  it("still relays a 200 with no content-type instead of failing over", async () => {
+    let calls = 0;
+    const router = createRouter({
+      failoverBackoffMs: 1,
+      adapters: [adapter("kilo", [model("kilo", "a")], async () => {
+        calls++;
+        const response = new Response("data: [DONE]\n\n");
+        response.headers.delete("content-type");
+        return response;
+      })],
+    });
+    const response = await router.handle(chat("auto", { stream: true }));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-dani-free-model")).toBe("kilo/a");
+    expect(calls).toBe(1);
+  });
+
   it("reports the joined array-envelope message in the final 503", async () => {
     const router = createRouter({
       failoverBackoffMs: 1,
