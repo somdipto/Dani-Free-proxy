@@ -13,8 +13,8 @@ Commands:
 
 Options:
   --config <path>  Use a specific JSON config file
-  --host <host>    Override the listen host (start only)
-  --port <port>    Override the listen port (start only)
+  --host <host>    Override the host (listen host for start, router endpoint for the rest)
+  --port <port>    Override the port (listen port for start, router endpoint for the rest)
   --help           Show this help
 `;
 

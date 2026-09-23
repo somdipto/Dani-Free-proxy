@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Local OpenAI-compatible router pinned to one free Kilo Code model.",
+  "description": "Local OpenAI-compatible router with a six-model free-tier failover chain (OpenCode + Kilo Code).",
   "scripts": {
     "start": "bun run src/cli.ts start",
     "dev": "bun --watch src/cli.ts start",
