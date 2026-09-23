@@ -11,7 +11,7 @@ This directory contains copyable configuration fragments:
 ```text
 Base URL: http://127.0.0.1:4190/v1
 API key:  local, unless DANI_FREE_API_KEY is configured
-Model:    auto (opencode/muse-spark-1.3-contributor-free), or an exact id from GET /v1/models
+Model:    auto (starts at opencode/nemotron-3-ultra-free), or an exact id from GET /v1/models
 ```
 
 The minimum provider contract is:
