@@ -132,8 +132,17 @@ export class KiloAdapter implements BackendAdapter {
       signal,
     });
     const payload: unknown = await readCappedJson(response, MAX_KILO_DISCOVERY_BYTES, DISCOVERY_MESSAGES);
+    const rows = isRecord(payload) && Array.isArray(payload.data) ? payload.data : undefined;
+    if (!rows) throw new Error("Kilo gateway returned an invalid /models response: expected a data array");
+    const today = new Date().toISOString().slice(0, 10);
+    const freeIds = new Set(
+      rows.flatMap((row) => (isRecord(row) && isUsableFreeRow(row, today) ? [row.id as string] : [])),
+    );
     const models = parseModels(payload);
-    const freeModels = models.filter((model) => CANONICAL_FREE_MODEL_SET.has(model.id));
+    // Dynamic: any currently free, unexpired chat model the gateway lists today,
+    // so new free models show up on the next refresh with no code change.
+    // CANONICAL_FREE_MODEL_SET stays as a fallback for rows missing free metadata.
+    const freeModels = models.filter((model) => freeIds.has(model.id));
     return prioritizeFreeModels(freeModels);
   }
 
@@ -233,15 +242,55 @@ function mapModel(row: Record<string, unknown>): BackendModel {
     ),
     maxTokens: positiveNumber(
       row.maxTokens ?? row.max_tokens ?? row.max_output_tokens ??
-        (isRecord(row.limits) ? row.limits.max_output_tokens : undefined),
+        (isRecord(row.limits) ? row.limits.max_output_tokens : undefined) ??
+        (isRecord(row.top_provider) ? row.top_provider.max_completion_tokens : undefined),
     ),
     healthy: true,
     source: "discovered",
   };
 }
 
+/** Router-style ids that forward to third-party pools rather than name one model. */
+const EXCLUDED_FREE_IDS: ReadonlySet<string> = new Set(["openrouter/free"]);
+/** Classifier / guard / embedding models are not chat assistants. */
+const NON_CHAT_ID = /(safety|guard|moderation|embed|rerank)/i;
+
+function hasZeroPrice(row: Record<string, unknown>): boolean {
+  if (!isRecord(row.pricing)) return false;
+  const prompt = Number(row.pricing.prompt);
+  const completion = Number(row.pricing.completion);
+  return prompt === 0 && completion === 0;
+}
+
+/** A model we can offer as free right now: marked free (or zero-priced / canonical), not expired, text-out chat. */
+export function isUsableFreeRow(row: Record<string, unknown>, today: string): boolean {
+  const id = typeof row.id === "string" ? row.id : "";
+  if (!id || EXCLUDED_FREE_IDS.has(id) || NON_CHAT_ID.test(id)) return false;
+  const free = row.isFree === true
+    || (row.isFree === undefined && (hasZeroPrice(row) || id.endsWith(":free") || CANONICAL_FREE_MODEL_SET.has(id)));
+  if (!free) return false;
+  if (typeof row.expiration_date === "string" && /^\d{4}-\d{2}-\d{2}/.test(row.expiration_date)) {
+    // The gateway keeps serving through the listed day; drop it the day after.
+    if (row.expiration_date.slice(0, 10) < today) return false;
+  }
+  const architecture = isRecord(row.architecture) ? row.architecture : undefined;
+  const outputs = architecture && Array.isArray(architecture.output_modalities) ? architecture.output_modalities : undefined;
+  if (outputs && !outputs.includes("text")) return false;
+  return true;
+}
+
 function modelCapabilities(row: Record<string, unknown>): Capability[] {
-  const capabilities: Capability[] = ["text", "tools", "reasoning"];
+  const parameters = Array.isArray(row.supported_parameters)
+    ? row.supported_parameters.filter((value): value is string => typeof value === "string")
+    : undefined;
+  const capabilities: Capability[] = ["text"];
+  if (!parameters || parameters.includes("tools")) capabilities.push("tools");
+  if (!parameters || parameters.includes("reasoning") || parameters.includes("include_reasoning")) capabilities.push("reasoning");
+  const architecture = isRecord(row.architecture) ? row.architecture : undefined;
+  const inputs = architecture && Array.isArray(architecture.input_modalities)
+    ? architecture.input_modalities.filter((value): value is string => typeof value === "string")
+    : [];
+  if (inputs.map((value) => value.toLowerCase()).includes("image")) capabilities.push("image");
   const declared = Array.isArray(row.capabilities)
     ? row.capabilities.filter((value): value is string => typeof value === "string")
     : [];
@@ -249,7 +298,7 @@ function modelCapabilities(row: Record<string, unknown>): Capability[] {
     ? row.modalities.filter((value): value is string => typeof value === "string")
     : [];
   const values = new Set([...declared, ...modalities].map((value) => value.toLowerCase()));
-  if (values.has("image") || values.has("vision") || values.has("multimodal")) capabilities.push("image");
+  if ((values.has("image") || values.has("vision") || values.has("multimodal")) && !capabilities.includes("image")) capabilities.push("image");
   return capabilities;
 }
 

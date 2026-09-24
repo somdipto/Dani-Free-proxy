@@ -1,6 +1,6 @@
 import { KiloAdapter } from "./adapters/kilo";
 import { OpenCodeAdapter } from "./adapters/opencode";
-import { createRouter, type RouterOptions } from "./router";
+import { createRouter, type Router, type RouterOptions } from "./router";
 import type { BackendAdapter } from "./types";
 
 export interface ServerOptions extends RouterOptions {
@@ -15,6 +15,7 @@ export interface RouterServer {
   close(closeActiveConnections?: boolean): void;
   readonly hostname: string;
   readonly port: number;
+  readonly router: Router;
 }
 
 /** OpenCode free ids occupy slots 1-3. `auto` starts at nemotron-3-ultra-free and walks the failover chain. */
@@ -39,9 +40,22 @@ export function defaultAdapters(): BackendAdapter[] {
   return [new OpenCodeAdapter(), new KiloAdapter()];
 }
 
+/**
+ * Adapters for the catalog-driven listener (`dani-free start`). Kilo's free
+ * gateway models only by default. The OpenCode sidecar adapter is off unless
+ * DANI_FREE_ENABLE_OPENCODE=1: OpenCode states its free tier may not be used
+ * from other harnesses, so it is not enabled on anyone's behalf.
+ */
+export function catalogAdapters(): BackendAdapter[] {
+  const adapters: BackendAdapter[] = [new KiloAdapter()];
+  if (process.env.DANI_FREE_ENABLE_OPENCODE === "1") adapters.push(new OpenCodeAdapter());
+  return adapters;
+}
+
 export function createRouterServer(options: ServerOptions = {}): RouterServer {
-  const primaryModel = options.primaryModel ?? OPENCODE_FREE_MODELS[0];
-  const allowedModels = options.allowedModels ?? [...OPENCODE_FREE_MODELS, ...KILO_FREE_MODELS];
+  // With a catalog the roster is whatever the catalog currently lists, so no fixed allowlist.
+  const primaryModel = options.primaryModel ?? (options.catalog ? KILO_FREE_MODELS[0] : OPENCODE_FREE_MODELS[0]);
+  const allowedModels = options.allowedModels ?? (options.catalog ? undefined : [...OPENCODE_FREE_MODELS, ...KILO_FREE_MODELS]);
   const router = createRouter({
     ...options,
     primaryModel,
@@ -56,9 +70,9 @@ export function createRouterServer(options: ServerOptions = {}): RouterServer {
     hostname: host,
     port,
     idleTimeout: 255,
-    async fetch(request) {
+    async fetch(request, bunServer) {
       try {
-        return await router.handle(request);
+        return await router.handle(request, bunServer.requestIP(request)?.address);
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") {
           return new Response(
@@ -75,6 +89,7 @@ export function createRouterServer(options: ServerOptions = {}): RouterServer {
   return {
     hostname: host,
     port: server.port ?? port,
+    router,
     stop(closeActiveConnections = false) {
       server.stop(closeActiveConnections);
     },

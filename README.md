@@ -26,6 +26,25 @@ Give this block to any agent (Hermes, OMP, OpenCode, Composio, Agent Mail, a pla
 
 Dani-Free is a small Bun/TypeScript local OpenAI-compatible router. The standard listener advertises three OpenCode free ids, then three Kilo free ids. `auto` walks an OpenCode-first six-model failover chain starting at `opencode/nemotron-3-ultra-free` — not an alias: if nemotron fails, another model in the chain answers. If a selected model is missing or unhealthy it is skipped; if it fails with a transport error, a 408, a 429 (pauses briefly, then advances to the next model — no pause after the final attempt), a 5xx, an anomalous HTTP 204, 1xx, or 3xx response (no content, an interim status, or a redirect — never a chat answer), an HTTP 200 with empty content or a malformed `choices` key, an HTTP 200 with an invalid JSON body, an HTTP 200 with a non-JSON, non-SSE body, an HTTP 200 carrying an `{"error": …}` envelope (OpenAI-style object, bare-string, string-array, list-of-error-objects, message-less numeric-code, bare-numeric, nested-envelope, plural-`errors`-key, Python-style `status_code`/`statusCode`-key, or FastAPI-style `detail`-key, or nested-`detail`-key form, `msg`-keyed form, or top-level-`msg`-keyed form, top-level-`message`-keyed form, or top-level-`code`-keyed form; an envelope carrying a 429 error code/status in `code`/`status`/`status_code`/`statusCode`/`type` — including a recognized rate-limit string code such as `rate_limit_exceeded` or `rate_limit_error` (even when keyed as `msg` or `message` (nested or top-level), or carried on the top level as `code`/`status`/`status_code`/`statusCode`/`type`) — pauses like a real 429 before advancing), or an HTTP 200 whose body exceeds the 8 MiB buffer cap, the router fails over to the next model in the chain. If the 200 body fails mid-read, the response is handed to the caller as-is instead, preserving the upstream error surface. Each attempt also has its own per-attempt deadline (default 60s, `DANI_FREE_ATTEMPT_TIMEOUT_MS`, clamped to the overall request deadline): a hung backend is abandoned after that long and the chain walks on with an `attempt timed out` reason. The overall request deadline is shared by all attempts: if it fires mid-chain (or the caller cancels), the request ends with a 504 without trying the remaining models. Any other 4xx refusal from the upstream is returned to the caller as-is with an `x-dani-free-model` header naming the model that answered. If every model in the chain fails, the caller gets a 503 `all_models_failed` with per-attempt reasons. Free-tier availability is promotional and can change; `:free` in an id is not a billing or privacy guarantee.
 
+## Model catalog: auto-refresh, auto default, picker (`dani-free start`)
+
+`dani-free start` runs from a live model catalog instead of a fixed six-model list:
+
+- **Refresh on every start and every 24h** (plus up to 30 min of random spread). Each refresh re-reads the Kilo gateway's model list and keeps every currently free, unexpired chat model, so a free model released today shows up with no code change, and an expired one goes away. `dani-free refresh` (or `POST /v1/models/refresh`, accepted from this machine only) refreshes right away.
+- **New models get a real test.** A model that has never answered gets one tiny test prompt during refresh. Models present at first install are the baseline; models that show up later carry `"new": true` in `/v1/models` for 7 days.
+- **`auto` is the default** and is listed first in `/v1/models` (`"default": true`). It tries healthy models in catalog order. A rate-limited model (429) goes on a short cooldown and is tried after the others, but it is never hidden. A model that fails 3 times in a row for other reasons is hidden until it answers again.
+- **Picker:** any id from `/v1/models` can be sent as `model` to pin it. If it fails, the rest of the chain still answers.
+- The catalog lives in `~/.config/dani-free/catalog.json` (mode 600). A failed refresh keeps the last catalog, and chat never waits for a refresh.
+- Kilo's free models work without an API key (anonymous, rate-limited by Kilo to 200 requests/hour per IP). A `DANI_FREE_KILO_API_KEY` raises that limit.
+- The OpenCode sidecar adapter is **off** on this listener unless `DANI_FREE_ENABLE_OPENCODE=1`. OpenCode has said its free tier may not be used from other harnesses.
+
+| Variable | Purpose |
+| --- | --- |
+| `DANI_FREE_CATALOG_PATH` | Catalog file; defaults to `catalog.json` next to the config file. |
+| `DANI_FREE_REFRESH_INTERVAL_HOURS` | Hours between background refreshes (1-168, default 24). |
+| `DANI_FREE_PROBE_ON_REFRESH` | `0` turns off the one-prompt test for never-answered models. |
+| `DANI_FREE_ENABLE_OPENCODE` | `1` adds the OpenCode sidecar adapter to `dani-free start`. |
+
 ## Requirements
 
 - Bun 1.1 or newer.

@@ -1,3 +1,4 @@
+import { isRateLimitFailure, type ModelCatalog, type ProbeResult, type RefreshSummary } from "./catalog";
 import type {
   BackendAdapter,
   BackendHealth,
@@ -30,6 +31,18 @@ export interface RouterOptions {
    * the hung backend. Defaults to 60s; clamped to the overall timeout.
    */
   attemptTimeoutMs?: number;
+  /**
+   * Persistent model catalog. When set (and no explicit allowedModels /
+   * modelChain), `auto` and GET /v1/models follow the catalog's ranking,
+   * failing models drop out, and every attempt's outcome is recorded.
+   */
+  catalog?: ModelCatalog;
+  /** Backend order for catalog ranking; defaults to kilo, then opencode, then mimo. */
+  backendPriority?: readonly string[];
+  /** Timeout for one refresh probe. Default 20s. */
+  probeTimeoutMs?: number;
+  /** Probe never-answered models during refresh. Default true when a catalog is set. */
+  probeOnRefresh?: boolean;
 }
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
@@ -877,6 +890,11 @@ function responseWithDeadline(response: Response, scope: CombinedSignal): Respon
   });
 }
 
+export function isLoopbackAddress(address: string): boolean {
+  const value = address.trim().toLowerCase();
+  return value === "::1" || value.startsWith("127.") || value.startsWith("::ffff:127.") || value === "localhost";
+}
+
 export class Router {
   readonly adapters: BackendAdapter[];
   readonly timeoutMs: number;
@@ -887,6 +905,10 @@ export class Router {
   readonly failoverBackoffMs: number;
   private readonly allowedModels?: ReadonlySet<string>;
   private readonly modelChain?: string[];
+  readonly catalog?: ModelCatalog;
+  readonly backendPriority: readonly string[];
+  readonly probeTimeoutMs: number;
+  readonly probeOnRefresh: boolean;
   private readonly modelCache = new Map<string, {
     expiresAt: number;
     models?: BackendModel[];
@@ -903,6 +925,82 @@ export class Router {
     this.allowedModels = options.allowedModels ? new Set(options.allowedModels) : undefined;
     this.modelChain = options.modelChain?.map((selector) => selector.trim()).filter((selector) => selector.length > 0);
     this.failoverBackoffMs = options.failoverBackoffMs ?? DEFAULT_FAILOVER_BACKOFF_MS;
+    this.catalog = options.catalog;
+    this.backendPriority = options.backendPriority ?? ["kilo", "opencode", "mimo"];
+    this.probeTimeoutMs = options.probeTimeoutMs ?? 20_000;
+    this.probeOnRefresh = options.probeOnRefresh ?? true;
+  }
+
+  /** Catalog ranking applies only when no explicit roster/chain pins the models. */
+  private get catalogActive(): boolean {
+    return Boolean(this.catalog?.populated) && !this.allowedModels && !this.modelChain;
+  }
+
+  /**
+   * Re-list every backend now (bypassing the discovery cache), probe models
+   * that have never answered, and persist. Safe to call concurrently.
+   */
+  async refreshCatalog(signal?: AbortSignal): Promise<RefreshSummary | undefined> {
+    if (!this.catalog) return undefined;
+    this.modelCache.clear();
+    const prober = this.probeOnRefresh
+      ? (adapter: BackendAdapter, model: BackendModel, probeSignal: AbortSignal) => this.probe(adapter, model, probeSignal)
+      : undefined;
+    const summary = await this.catalog.refresh(this.adapters, { signal, prober, probeConcurrency: 2 });
+    this.modelCache.clear();
+    return summary;
+  }
+
+  /** One tiny real completion: proves the model answers with content right now. */
+  private async probe(adapter: BackendAdapter, model: BackendModel, signal: AbortSignal): Promise<ProbeResult> {
+    const startedAt = Date.now();
+    const scope = deadline(signal, this.probeTimeoutMs);
+    try {
+      const request: ChatRequest = {
+        model: model.id,
+        messages: [{ role: "user", content: "Reply with exactly: ok" }],
+        max_tokens: 64,
+        temperature: 0,
+        stream: false,
+      };
+      const response = await raceWithSignal(adapter.complete(request, model, scope.signal), scope.signal);
+      const latencyMs = Date.now() - startedAt;
+      if (response.status !== 200) {
+        void response.body?.cancel().catch(() => undefined);
+        return {
+          ok: false,
+          latencyMs,
+          error: `HTTP ${response.status}`,
+          rateLimited: response.status === 429,
+          retryAfterMs: retryAfterMs(response.headers),
+        };
+      }
+      let payload: unknown;
+      try {
+        payload = JSON.parse(await raceWithSignal(response.text(), scope.signal));
+      } catch {
+        return { ok: false, latencyMs, error: "invalid JSON body" };
+      }
+      if (errorEnvelopeMessage(payload) !== undefined) {
+        return { ok: false, latencyMs, error: "error envelope", rateLimited: envelopeStatus(payload) === 429 };
+      }
+      // Reasoning models may spend a tiny budget thinking; a well-formed choice counts as alive.
+      const choices = isRecord(payload) && Array.isArray(payload.choices) ? payload.choices : undefined;
+      if (!choices || choices.length === 0) return { ok: false, latencyMs, error: "no choices" };
+      return { ok: true, latencyMs };
+    } catch (error) {
+      const status = statusFrom(error);
+      if (isAbort(error) && signal.aborted) throw error;
+      return {
+        ok: false,
+        latencyMs: Date.now() - startedAt,
+        error: status ? `HTTP ${status}` : sanitizeReason(error, "probe failed"),
+        rateLimited: status === 429,
+        retryAfterMs: retryAfterFrom(error),
+      };
+    } finally {
+      scope.dispose();
+    }
   }
 
   private findAdapter(id: string): BackendAdapter | undefined {
@@ -948,7 +1046,13 @@ export class Router {
         }
       }),
     );
-    return groups.flat().filter((model) => !this.allowedModels || this.allowedModels.has(modelSelectorId(model)));
+    const listed = groups.flat().filter((model) => !this.allowedModels || this.allowedModels.has(modelSelectorId(model)));
+    if (!this.catalogActive) return listed;
+    const order = this.catalog!.ranked(this.backendPriority);
+    const rank = new Map(order.map((selector, index) => [selector, index]));
+    return listed
+      .filter((model) => rank.has(modelSelectorId(model)))
+      .sort((left, right) => rank.get(modelSelectorId(left))! - rank.get(modelSelectorId(right))!);
   }
 
   async health(signal?: AbortSignal): Promise<BackendHealth[]> {
@@ -1009,6 +1113,7 @@ export class Router {
       );
     }
     if (this.allowedModels) return opencodeFirst([...this.allowedModels]);
+    if (this.catalogActive) return this.catalog!.ranked(this.backendPriority);
     const models = await this.models(signal);
     return opencodeFirst(models.map(modelSelectorId));
   }
@@ -1100,6 +1205,21 @@ export class Router {
    */
   private async completeWithFailover(request: ChatRequest, attempts: Route[], signal: AbortSignal): Promise<Response> {
     const failures: AttemptFailure[] = [];
+    const catalog = this.catalog;
+    if (catalog) {
+      const push = failures.push.bind(failures);
+      failures.push = (...items: AttemptFailure[]) => {
+        for (const item of items) {
+          catalog.recordFailure(item.model, item.reason, { rateLimited: isRateLimitFailure(item.status, item.reason) });
+        }
+        return push(...items);
+      };
+    }
+    let attemptStartedAt = Date.now();
+    const answered = (response: Response, selector: string): Response => {
+      catalog?.recordSuccess(selector, Date.now() - attemptStartedAt);
+      return withModelHeader(response, selector);
+    };
     const required = requiredCapabilities(request);
 
     for (let index = 0; index < attempts.length; index += 1) {
@@ -1123,6 +1243,7 @@ export class Router {
       let response: Response;
       // A hung backend must not consume the whole request deadline: each
       // attempt runs under its own shorter deadline so the chain can walk on.
+      attemptStartedAt = Date.now();
       const attemptScope = deadline(signal, this.attemptTimeoutMs);
       try {
         const completion = route.backend.complete({ ...request, model: route.model.id }, route.model, attemptScope.signal);
@@ -1270,6 +1391,7 @@ export class Router {
         }
         const headers = new Headers(response.headers);
         headers.set(ANSWERED_MODEL_HEADER, selector);
+        catalog?.recordSuccess(selector, Date.now() - attemptStartedAt);
         return new Response(text, { status: response.status, statusText: response.statusText, headers });
       }
       // A 2xx whose body is neither JSON nor an SSE stream is not a chat
@@ -1285,7 +1407,7 @@ export class Router {
         });
         continue;
       }
-      return withModelHeader(response, selector);
+      return answered(response, selector);
     }
     return allModelsFailedResponse(failures);
   }
@@ -1313,7 +1435,7 @@ export class Router {
     return this.completeWithFailover(request, [route, ...rest], signal);
   }
 
-  async handle(request: Request): Promise<Response> {
+  async handle(request: Request, clientAddress?: string): Promise<Response> {
     const receivedAt = Date.now();
     if (this.apiKey && !constantTimeEqual(requestApiKey(request) ?? "", this.apiKey)) {
       return structuredError("Invalid API key", 401, "invalid_api_key", "authentication_error");
@@ -1329,16 +1451,58 @@ export class Router {
           status: ok ? "ok" : "degraded",
           checkedAt: new Date().toISOString(),
           backends,
+          ...(this.catalog
+            ? {
+              catalog: {
+                refreshedAt: this.catalog.refreshedAt ?? null,
+                lastRefreshError: this.catalog.lastRefreshError ? redactDiagnostics(this.catalog.lastRefreshError) : null,
+                models: this.catalog.entries().length,
+                visible: this.catalog.ranked(this.backendPriority).length,
+              },
+            }
+            : {}),
         });
       } finally {
         timeout.dispose();
+      }
+    }
+    if (request.method === "POST" && url.pathname === "/v1/models/refresh") {
+      if (!this.catalog) return structuredError("Model catalog is not enabled", 404, "not_found");
+      if (clientAddress !== undefined && !isLoopbackAddress(clientAddress)) {
+        return structuredError("Refresh is only allowed from this machine", 403, "forbidden", "permission_error");
+      }
+      try {
+        const summary = await this.refreshCatalog(request.signal);
+        return json({ ok: true, ...summary });
+      } catch (error) {
+        if (isAbort(error)) return structuredError("Refresh cancelled", 504, "timeout", "api_error");
+        return structuredError("Model refresh failed", 502, "refresh_failed", "api_error");
       }
     }
     if (request.method === "GET" && url.pathname === "/v1/models") {
       const timeout = deadline(request.signal, this.timeoutMs);
       try {
         const models = await this.models(timeout.signal);
-        return json({ object: "list", data: models.map(publicModel) });
+        if (!this.catalog) return json({ object: "list", data: models.map(publicModel) });
+        const catalog = this.catalog;
+        const auto = {
+          id: "auto",
+          object: "model",
+          name: "Auto",
+          capabilities: [...new Set(models.flatMap((model) => model.capabilities))],
+          contextWindow: Math.max(0, ...models.map((model) => model.contextWindow)),
+          maxTokens: Math.max(0, ...models.map((model) => model.maxTokens)),
+          healthy: models.length > 0,
+          default: true,
+        };
+        return json({
+          object: "list",
+          refreshedAt: catalog.refreshedAt ?? null,
+          data: [auto, ...models.map((model) => {
+            const entry = catalog.get(modelSelectorId(model));
+            return { ...publicModel(model), new: entry ? catalog.isNew(entry) : false };
+          })],
+        });
       } catch (error) {
         if (isAbort(error)) return structuredError("Model discovery timed out", 504, "timeout", "api_error");
         return structuredError("Model discovery failed", 502, "backend_network_error", "api_error");

@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
 import type { DaniFreeConfig } from "./config";
 import { applyBackendEnvironment, loadConfig } from "./config";
-import { startServer } from "./server";
+import { ModelCatalog } from "./catalog";
+import { startRefreshScheduler } from "./refresh-scheduler";
+import { catalogAdapters, startServer } from "./server";
 
 const HELP = `Usage: dani-free <command> [options]
 
@@ -9,6 +11,7 @@ Commands:
   start    Start the local OpenAI-compatible router in the foreground
   status   Check the local router health endpoint
   models   List models exposed by the local router
+  refresh  Re-check every backend for new or removed models now
   doctor   Check router health and model discovery
 
 Options:
@@ -141,7 +144,7 @@ async function runModels(config: DaniFreeConfig): Promise<number> {
   printJson(models.map((model) => {
     if (!model || typeof model !== "object") return model;
     const item = model as Record<string, unknown>;
-    return { id: item.id, backend: item.backend, name: item.name, capabilities: item.capabilities, contextWindow: item.contextWindow, maxTokens: item.maxTokens, healthy: item.healthy };
+    return { id: item.id, backend: item.backend, name: item.name, capabilities: item.capabilities, contextWindow: item.contextWindow, maxTokens: item.maxTokens, healthy: item.healthy, new: item.new, default: item.default };
   }), configSecrets(config));
   return 0;
 }
@@ -168,9 +171,31 @@ async function runDoctor(config: DaniFreeConfig): Promise<number> {
   }
   return failed ? 1 : 0;
 }
+async function runRefresh(config: DaniFreeConfig): Promise<number> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(config.requestTimeoutMs, 120_000));
+  try {
+    const headers = new Headers(authHeaders(config));
+    const response = await fetch(`${endpoint(config)}/v1/models/refresh`, { method: "POST", headers, signal: controller.signal });
+    const body = await response.json().catch(() => undefined);
+    if (!response.ok) throw new Error(`router returned HTTP ${response.status}`);
+    printJson(body, configSecrets(config));
+    return 0;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw new Error("refresh timed out");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function runStart(config: DaniFreeConfig): Promise<number> {
   applyBackendEnvironment(config);
+  const catalog = new ModelCatalog({ path: config.catalogPath });
   const started = startServer({
+    catalog,
+    adapters: catalogAdapters(),
+    probeOnRefresh: config.probeOnRefresh,
     host: config.host,
     port: config.port,
     apiKey: config.apiKey,
@@ -179,10 +204,22 @@ async function runStart(config: DaniFreeConfig): Promise<number> {
     maxBodyBytes: config.bodyLimitBytes,
   });
   console.log(`dani-free listening at ${endpoint(config)}`);
+  // Boot-time refresh plus a daily one. Chat is served from the saved catalog
+  // (or live discovery on a first run) while the refresh runs.
+  const scheduler = startRefreshScheduler(() => started.router.refreshCatalog(), {
+    intervalMs: config.refreshIntervalHours * 60 * 60 * 1000,
+    onResult: (summary) => {
+      if (!summary) return;
+      const note = summary.backendErrors.length ? ` (backend errors: ${summary.backendErrors.map((item) => item.backend).join(", ")})` : "";
+      console.log(`[catalog] refreshed: ${summary.visible}/${summary.total} models usable, +${summary.added.length} new, -${summary.removed.length} gone${note}`);
+    },
+    onError: (error) => console.error(`[catalog] refresh failed: ${error instanceof Error ? error.message : String(error)}`),
+  });
   let shuttingDown = false;
   const shutdown = () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    scheduler.stop();
     started.close(true);
     process.exit(0);
   };
@@ -205,6 +242,7 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
     case "start": return runStart(config);
     case "status": return runStatus(config);
     case "models": return runModels(config);
+    case "refresh": return runRefresh(config);
     case "doctor": return runDoctor(config);
     default: throw new Error(`unknown command: ${parsed.command}`);
   }

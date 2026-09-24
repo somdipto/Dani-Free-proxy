@@ -20,6 +20,12 @@ export interface DaniFreeConfig {
   bodyLimitBytes: number;
   configPath: string;
   backends: Record<BackendId, BackendSettings>;
+  /** Persistent model catalog file. */
+  catalogPath: string;
+  /** Hours between background model refreshes (plus up to 30 min jitter). */
+  refreshIntervalHours: number;
+  /** Send one tiny test prompt to models that have never answered, during refresh. */
+  probeOnRefresh: boolean;
 }
 
 interface ConfigFile {
@@ -29,6 +35,9 @@ interface ConfigFile {
   requestTimeoutMs?: unknown;
   attemptTimeoutMs?: unknown;
   bodyLimitBytes?: unknown;
+  catalogPath?: unknown;
+  refreshIntervalHours?: unknown;
+  probeOnRefresh?: unknown;
   backends?: unknown;
   opencode?: unknown;
   kilo?: unknown;
@@ -43,6 +52,9 @@ const DEFAULTS: DaniFreeConfig = {
   attemptTimeoutMs: 60_000,
   bodyLimitBytes: 4 * 1024 * 1024,
   configPath: DEFAULT_CONFIG_PATH,
+  catalogPath: join(homedir(), ".config", "dani-free", "catalog.json"),
+  refreshIntervalHours: 24,
+  probeOnRefresh: true,
   backends: {
     opencode: { baseUrl: "http://127.0.0.1:4187" },
     kilo: { baseUrl: "https://api.kilo.ai/api/gateway" },
@@ -156,7 +168,12 @@ export function loadConfig(configPath?: string, defaults: ConfigDefaultOverrides
     }
   }
 
-  return { host, port, apiKey, requestTimeoutMs, attemptTimeoutMs, bodyLimitBytes, configPath: selectedPath, backends };
+  const catalogPath = resolve(env("DANI_FREE_CATALOG_PATH") ?? stringValue(file.catalogPath, "catalogPath") ?? join(dirname(selectedPath), "catalog.json"));
+  const refreshIntervalHours = numberValue(env("DANI_FREE_REFRESH_INTERVAL_HOURS") ?? file.refreshIntervalHours, "refreshIntervalHours", 1, 168) ?? DEFAULTS.refreshIntervalHours;
+  const probeRaw = env("DANI_FREE_PROBE_ON_REFRESH") ?? file.probeOnRefresh;
+  const probeOnRefresh = probeRaw === undefined ? DEFAULTS.probeOnRefresh : !(probeRaw === false || probeRaw === "0" || probeRaw === "false");
+
+  return { host, port, apiKey, requestTimeoutMs, attemptTimeoutMs, bodyLimitBytes, configPath: selectedPath, backends, catalogPath, refreshIntervalHours, probeOnRefresh };
 }
 
 /** Bridge merged backend settings into the environment so adapters constructed afterwards read them. */
