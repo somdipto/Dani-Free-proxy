@@ -1,3 +1,4 @@
+process.env.DANI_FREE_OPENCODE_TOOLS = "1";
 import { describe, expect, it } from "bun:test";
 import { OpenCodeAdapter } from "../src/adapters/opencode";
 

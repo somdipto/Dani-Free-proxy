@@ -9,6 +9,7 @@ import type {
 import { readCappedJson } from "./capped-json";
 import { retryAfterMs } from "../retry-after";
 import {
+  activeTools,
   parseToolOutput,
   renderAssistantToolCalls,
   renderToolResultPrefix,
@@ -166,7 +167,11 @@ function isFreeModelId(id: string): boolean {
  * metadata actually declares image input (capabilities.input.image === true).
  */
 function modelCapabilities(record: UnknownRecord): Capability[] {
-  const capabilities: Capability[] = ["text", "tools", "reasoning"];
+  // Tool calls run through the text protocol, which the free models follow
+  // unreliably under OpenCode's own system prompt (1 of 4 in a live check).
+  // Off by default so agent turns with tools go to backends with native tool
+  // calls; DANI_FREE_OPENCODE_TOOLS=1 turns it on.
+  const capabilities: Capability[] = process.env.DANI_FREE_OPENCODE_TOOLS === "1" ? ["text", "tools", "reasoning"] : ["text", "reasoning"];
   const declared = isRecord(record.capabilities) ? record.capabilities : undefined;
   const input = declared && isRecord(declared.input) ? declared.input : undefined;
   if (input?.image === true) capabilities.push("image");
@@ -236,8 +241,18 @@ function toSessionMessage(messages: ChatMessage[], request?: ChatRequest): Sessi
     if (combined.trim() !== "") parts.push({ type: "text", text: combined });
   }
   const tools = request ? toolInstructions(request) : "";
-  if (tools) system.push(tools);
+  if (tools) {
+    system.push(tools);
+    // OpenCode's own system prompt pushes the model toward its built-in
+    // tools; a reminder right next to the latest turn keeps it on the host protocol.
+    parts.push({ type: "text", text: toolReminder(request!) });
+  }
   return { system: system.join("\n\n"), parts };
+}
+
+function toolReminder(request: ChatRequest): string {
+  const names = activeTools(request).map((tool) => tool.name).join(", ");
+  return `(host note: your built-in tools are off. You CAN act through the host tools: ${names}. To call one, reply with <tool_call>{"name": "...", "arguments": {...}}</tool_call> and stop. The host runs it and replies with the result.)`;
 }
 
 /** Extract assistant text from a sidecar message's parts[]. */
@@ -777,7 +792,7 @@ export class OpenCodeAdapter implements BackendAdapter {
               handled.add(item.id);
               const path = kind === "permission" ? `/permission/${item.id}/reply` : `/question/${item.id}/reject`;
               const body = kind === "permission"
-                ? JSON.stringify({ reply: "reject", message: "Built-in tools are switched off here. Use the host tools protocol or answer in text." })
+                ? JSON.stringify({ reply: "reject", message: "Built-in tools are off. Do not retry them. Call a host tool instead by replying with <tool_call>{\"name\": \"TOOL\", \"arguments\": {...}}</tool_call> using a tool from the Host tools list, or answer in text." })
                 : "{}";
               await this.fetchFn(joinUrl(this.baseUrl!, path), { method: "POST", headers: this.headers(true), body, signal }).catch(() => undefined);
             }

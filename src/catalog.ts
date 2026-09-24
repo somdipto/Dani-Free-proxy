@@ -295,6 +295,12 @@ export class ModelCatalog {
         continue;
       }
       const models = result.models ?? [];
+      if (models.length === 0 && Object.values(this.data.entries).some((entry) => entry.backend === result.adapter.id && entry.present)) {
+        // An empty list (sidecar still starting, soft discovery failure) is not
+        // evidence every model vanished: keep what we knew.
+        backendErrors.push({ backend: result.adapter.id, error: "backend listed no models" });
+        continue;
+      }
       const seen = new Set<string>();
       models.forEach((model, order) => {
         const selector = selectorOf(model);

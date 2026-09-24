@@ -26,7 +26,7 @@ function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-interface ToolSpec {
+export interface ToolSpec {
   name: string;
   description: string;
   parameters: unknown;
