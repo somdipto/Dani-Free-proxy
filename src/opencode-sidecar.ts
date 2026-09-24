@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -102,6 +102,8 @@ export class OpenCodeSidecar {
   readonly password = randomBytes(24).toString("base64url");
   private child?: ChildProcess;
   private stopping = false;
+  /** Set by shutdown: no start, restart or respawn may happen after it. */
+  private disposed = false;
   private url?: string;
   private readonly log: (line: string) => void;
   private readonly fetchFn: typeof fetch;
@@ -178,7 +180,10 @@ export class OpenCodeSidecar {
 
   /** Start (or restart) `opencode serve` and resolve with its base URL once healthy. */
   async start(signal?: AbortSignal): Promise<string> {
+    if (this.disposed) throw new Error("sidecar is shut down");
     const binary = await this.ensureBinary(signal);
+    // Shutdown may have happened while the download ran.
+    if (this.disposed) throw new Error("sidecar is shut down");
     const cwd = this.prepareDirs();
     this.stopping = false;
     const child = spawn(binary, ["serve", "--port", "0", "--hostname", "127.0.0.1", "--pure"], {
@@ -212,7 +217,7 @@ export class OpenCodeSidecar {
       this.url = undefined;
       if (this.stopping) return;
       this.log("[free-backend] sidecar stopped, restarting");
-      setTimeout(() => { if (!this.stopping) void this.start().catch(() => undefined); }, RESTART_DELAY_MS);
+      setTimeout(() => { if (!this.stopping && !this.disposed) void this.start().catch(() => undefined); }, RESTART_DELAY_MS);
     });
     return url;
   }
@@ -249,15 +254,28 @@ export class OpenCodeSidecar {
   }
 
   async restart(): Promise<string> {
-    this.stop();
+    this.halt();
     return this.start();
   }
 
+  /** Stop for good (proxy shutdown). Synchronous, so it finishes before process.exit. */
   stop(): void {
+    this.disposed = true;
+    this.halt();
+  }
+
+  private halt(): void {
     this.stopping = true;
     const child = this.child;
     this.child = undefined;
     this.url = undefined;
-    child?.kill();
+    if (!child || child.exitCode !== null || child.pid === undefined) return;
+    if (process.platform === "win32") {
+      // Windows has no process groups for our parent to clean up: kill the
+      // whole OpenCode tree here, and wait for it, before the proxy exits.
+      spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true, timeout: 5_000 });
+    } else {
+      child.kill("SIGTERM");
+    }
   }
 }

@@ -230,3 +230,26 @@ describe("catalog selectors", () => {
     expect(catalog.ranked()).toEqual(["opencode/big-pickle"]);
   });
 });
+
+describe("first run", () => {
+  it("ranks models that have answered ahead of never-answered ones", async () => {
+    const catalog = new ModelCatalog();
+    const kilo = fakeBackend("kilo", ["a:free", "b:free"], async (id) => completion(id));
+    await catalog.refresh([kilo]);
+    expect(catalog.ranked()).toEqual(["kilo/a:free", "kilo/b:free"]);
+    catalog.recordSuccess("kilo/b:free", 100);
+    expect(catalog.ranked()).toEqual(["kilo/b:free", "kilo/a:free"]);
+  });
+
+  it("a streaming attempt with no first byte moves to the next model", async () => {
+    const catalog = new ModelCatalog();
+    const hung = fakeBackend("kilo", ["hung:free", "fast:free"], (id) => id === "hung:free"
+      ? new Promise<Response>(() => undefined)
+      : Promise.resolve(new Response(`data: ${JSON.stringify({ id: "x", model: id, choices: [{ index: 0, delta: { content: "hi" } }] })}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } })));
+    const router = createRouter({ adapters: [hung], catalog, probeOnRefresh: false, attemptTimeoutMs: 150, brand: { id: "dani-free-auto", name: "Dani Free Auto" } });
+    await router.refreshCatalog();
+    const text = await (await router.handle(chat({ stream: true }))).text();
+    expect(text).toContain('"content":"hi"');
+    expect(hung.calls).toEqual(["hung:free", "fast:free"]);
+  });
+});

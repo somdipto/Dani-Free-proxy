@@ -63,6 +63,8 @@ export interface RouterOptions {
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
 export const DEFAULT_ATTEMPT_TIMEOUT_MS = 60_000;
+/** Longest wait for a streaming attempt's first byte before trying the next model. */
+export const STREAM_FIRST_BYTE_MS = 25_000;
 export const DEFAULT_MAX_BODY_BYTES = 1_048_576;
 const MODEL_CACHE_TTL_MS = 5_000;
 export const DEFAULT_PRIMARY_MODEL = "kilo/nex-agi/nex-n2.5-pro:free";
@@ -1075,7 +1077,7 @@ export class Router {
     this.quotaBackends = new Set(options.quotaBackends ?? ["opencode"]);
     this.brand = options.brand;
     this.onQuotaChange = options.onQuotaChange;
-    this.probeTimeoutMs = options.probeTimeoutMs ?? 20_000;
+    this.probeTimeoutMs = options.probeTimeoutMs ?? 12_000;
     this.probeOnRefresh = options.probeOnRefresh ?? true;
     this.privateMode = options.privateMode ?? false;
   }
@@ -1159,7 +1161,7 @@ export class Router {
     const prober = this.probeOnRefresh
       ? (adapter: BackendAdapter, model: BackendModel, probeSignal: AbortSignal) => this.probe(adapter, model, probeSignal)
       : undefined;
-    const summary = await this.catalog.refresh(this.adapters, { signal, prober, probeConcurrency: 2 });
+    const summary = await this.catalog.refresh(this.adapters, { signal, prober, probeConcurrency: 4 });
     this.modelCache.clear();
     return summary;
   }
@@ -1466,7 +1468,14 @@ export class Router {
       // A hung backend must not consume the whole request deadline: each
       // attempt runs under its own shorter deadline so the chain can walk on.
       attemptStartedAt = Date.now();
-      const attemptScope = deadline(signal, this.attemptTimeoutMs);
+      // A real stream sends headers with its first token, so a streaming
+      // attempt with no first byte after STREAM_FIRST_BYTE_MS is hung: move on
+      // instead of burning the full attempt deadline. (OpenCode buffers the
+      // whole turn before answering, so it keeps the full deadline.)
+      const firstByteLimit = request.stream === true && route.model.backend !== "opencode"
+        ? Math.min(this.attemptTimeoutMs, STREAM_FIRST_BYTE_MS)
+        : this.attemptTimeoutMs;
+      const attemptScope = deadline(signal, firstByteLimit);
       try {
         const completion = route.backend.complete({ ...request, model: route.model.id }, route.model, attemptScope.signal);
         // An adapter may ignore cancellation and return a body after the caller has left.

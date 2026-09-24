@@ -228,12 +228,16 @@ export class ModelCatalog {
     const cooling = (entry: CatalogEntry) => (entry.cooldownUntil && entry.cooldownUntil > nowIso ? 1 : 0);
     const exhausted = new Set(this.exhaustedBackends());
     const held = (entry: CatalogEntry) => (exhausted.has(entry.backend) ? 1 : 0);
+    const proven = (entry: CatalogEntry) => (entry.successes > 0 ? 1 : 0);
     return this.entries()
       .filter((entry) => !this.isHidden(entry))
       .sort((left, right) =>
         held(left) - held(right)
         || cooling(left) - cooling(right)
         || left.consecutiveFailures - right.consecutiveFailures
+        // Proven models before never-answered ones: on a fresh install the
+        // first turns avoid models that may hang while probes are still running.
+        || proven(right) - proven(left)
         || priority(left.backend) - priority(right.backend)
         || left.order - right.order
         || left.selector.localeCompare(right.selector))

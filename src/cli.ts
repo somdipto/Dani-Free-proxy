@@ -299,6 +299,8 @@ async function runStart(config: DaniFreeConfig): Promise<number> {
     started.close(true);
     process.exit(0);
   };
+  // Any other exit path (uncaught error, process.exit elsewhere) still stops the sidecar.
+  process.once("exit", () => sidecar?.stop());
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
   // Parent-death watchdog for embedding apps (works on Windows too, where there is no SIGTERM):
