@@ -43,6 +43,8 @@ export interface RouterOptions {
   probeTimeoutMs?: number;
   /** Probe never-answered models during refresh. Default true when a catalog is set. */
   probeOnRefresh?: boolean;
+  /** Reported on /health and used for the empty-catalog message. */
+  privateMode?: boolean;
 }
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
@@ -909,6 +911,7 @@ export class Router {
   readonly backendPriority: readonly string[];
   readonly probeTimeoutMs: number;
   readonly probeOnRefresh: boolean;
+  readonly privateMode: boolean;
   private readonly modelCache = new Map<string, {
     expiresAt: number;
     models?: BackendModel[];
@@ -929,6 +932,7 @@ export class Router {
     this.backendPriority = options.backendPriority ?? ["kilo", "opencode", "mimo"];
     this.probeTimeoutMs = options.probeTimeoutMs ?? 20_000;
     this.probeOnRefresh = options.probeOnRefresh ?? true;
+    this.privateMode = options.privateMode ?? false;
   }
 
   /** Catalog ranking applies only when no explicit roster/chain pins the models. */
@@ -1419,6 +1423,16 @@ export class Router {
     }
     if (parsed.auto) {
       const chain = await this.resolveChain(signal);
+      if (chain.length === 0 && this.catalog) {
+        return structuredError(
+          this.privateMode
+            ? "No models are available in Private mode. Add a provider key, or turn Private mode off to use free models."
+            : "No models are available right now. Try again shortly.",
+          503,
+          "no_models_available",
+          "api_error",
+        );
+      }
       if (chain.length === 0) {
         // No usable chain: resolve the primary for a precise 404/503.
         const route = await this.resolveExplicit(this.primaryModel, signal);
@@ -1456,6 +1470,7 @@ export class Router {
               catalog: {
                 refreshedAt: this.catalog.refreshedAt ?? null,
                 lastRefreshError: this.catalog.lastRefreshError ? redactDiagnostics(this.catalog.lastRefreshError) : null,
+                privateMode: this.privateMode,
                 models: this.catalog.entries().length,
                 visible: this.catalog.ranked(this.backendPriority).length,
               },

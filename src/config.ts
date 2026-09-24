@@ -26,6 +26,16 @@ export interface DaniFreeConfig {
   refreshIntervalHours: number;
   /** Send one tiny test prompt to models that have never answered, during refresh. */
   probeOnRefresh: boolean;
+  /** Skip models that may train on prompts (and routers/stealth models with unknown data handling). */
+  privateMode: boolean;
+  /** Per-install client key file, used when no apiKey is configured. */
+  apiKeyFile: string;
+  /** Written while `start` runs: pid, actual port, base URL. */
+  runtimePath: string;
+  /** Require a client key (the per-install one if none is configured). Default true for `start`. */
+  requireKey: boolean;
+  /** Fail instead of moving to another port when the chosen one is busy. */
+  strictPort: boolean;
 }
 
 interface ConfigFile {
@@ -38,6 +48,7 @@ interface ConfigFile {
   catalogPath?: unknown;
   refreshIntervalHours?: unknown;
   probeOnRefresh?: unknown;
+  privateMode?: unknown;
   backends?: unknown;
   opencode?: unknown;
   kilo?: unknown;
@@ -55,6 +66,11 @@ const DEFAULTS: DaniFreeConfig = {
   catalogPath: join(homedir(), ".config", "dani-free", "catalog.json"),
   refreshIntervalHours: 24,
   probeOnRefresh: true,
+  privateMode: false,
+  apiKeyFile: join(homedir(), ".config", "dani-free", "api-key"),
+  runtimePath: join(homedir(), ".config", "dani-free", "runtime.json"),
+  requireKey: true,
+  strictPort: false,
   backends: {
     opencode: { baseUrl: "http://127.0.0.1:4187" },
     kilo: { baseUrl: "https://api.kilo.ai/api/gateway" },
@@ -173,7 +189,17 @@ export function loadConfig(configPath?: string, defaults: ConfigDefaultOverrides
   const probeRaw = env("DANI_FREE_PROBE_ON_REFRESH") ?? file.probeOnRefresh;
   const probeOnRefresh = probeRaw === undefined ? DEFAULTS.probeOnRefresh : !(probeRaw === false || probeRaw === "0" || probeRaw === "false");
 
-  return { host, port, apiKey, requestTimeoutMs, attemptTimeoutMs, bodyLimitBytes, configPath: selectedPath, backends, catalogPath, refreshIntervalHours, probeOnRefresh };
+  const privateRaw = env("DANI_FREE_PRIVATE_MODE") ?? file.privateMode;
+  const privateMode = privateRaw === undefined ? DEFAULTS.privateMode : privateRaw === true || privateRaw === "1" || privateRaw === "true";
+  const apiKeyFile = join(dirname(selectedPath), "api-key");
+  const runtimePath = join(dirname(selectedPath), "runtime.json");
+  const requireKey = env("DANI_FREE_NO_AUTH") !== "1";
+  const strictPort = env("DANI_FREE_STRICT_PORT") === "1";
+
+  return {
+    host, port, apiKey, requestTimeoutMs, attemptTimeoutMs, bodyLimitBytes, configPath: selectedPath, backends,
+    catalogPath, refreshIntervalHours, probeOnRefresh, privateMode, apiKeyFile, runtimePath, requireKey, strictPort,
+  };
 }
 
 /** Bridge merged backend settings into the environment so adapters constructed afterwards read them. */
@@ -190,6 +216,7 @@ export function applyBackendEnvironment(config: DaniFreeConfig): void {
   for (const [name, value] of Object.entries(values)) {
     if (value !== undefined) process.env[name] = value;
   }
+  if (config.privateMode) process.env.DANI_FREE_PRIVATE_MODE = "1";
 }
 
 export function configDirectory(configPath = DEFAULT_CONFIG_PATH): string {

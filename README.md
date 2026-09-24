@@ -45,6 +45,14 @@ Dani-Free is a small Bun/TypeScript local OpenAI-compatible router. The standard
 | `DANI_FREE_PROBE_ON_REFRESH` | `0` turns off the one-prompt test for never-answered models. |
 | `DANI_FREE_ENABLE_OPENCODE` | `1` adds the OpenCode sidecar adapter to `dani-free start`. |
 
+## Embedding (desktop apps)
+
+- **Single-file binaries:** `bun run build:bin` builds `dist/dani-free-{darwin-x64,darwin-arm64,linux-x64,linux-arm64,windows-x64.exe}` with the Bun runtime inside, plus `SHA256SUMS`. Nothing else has to be installed on the user's machine.
+- **Per-install key:** `dani-free start` creates a random 256-bit client key the first time (`~/.config/dani-free/api-key`, mode 600) and requires it on every request (`Authorization: Bearer <key>` or `x-api-key`). A configured `DANI_FREE_API_KEY` wins. `DANI_FREE_NO_AUTH=1` turns auth off (not recommended). `dani-free key` prints the key file's path.
+- **Port fallback:** if the port (default 4190) is busy, it tries the next nine, then any free port. `DANI_FREE_STRICT_PORT=1` fails instead.
+- **Ready line:** once it's listening, stdout prints one line, `DANI_FREE_READY {"baseUrl":…,"port":…,"pid":…,"apiKeyFile":…,"privateMode":…}`. It never prints the key itself. The same data goes to `~/.config/dani-free/runtime.json` while it runs, and that file is removed on shutdown. `status`, `models` and `refresh` follow it automatically.
+- **Private mode:** `DANI_FREE_PRIVATE_MODE=1` (or `"privateMode": true`) skips every model the gateway marks as possibly training on prompts, plus pool routers and stealth models. As of 2026-09-25 that is every free Kilo model, so Private mode needs a provider key to have any models. Without one, chat returns a clear `503 no_models_available`.
+
 ## Requirements
 
 - Bun 1.1 or newer.

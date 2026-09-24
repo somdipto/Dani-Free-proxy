@@ -40,6 +40,8 @@ export interface CatalogEntry {
   /** Rate-limited until this time: still offered, but tried after models that are not cooling down. */
   cooldownUntil?: string;
   rateLimits?: number;
+  /** Present when the catalog was first populated (first install): never flagged new. */
+  baseline?: boolean;
 }
 
 export interface CatalogFile {
@@ -146,7 +148,7 @@ export class ModelCatalog {
     const first = Date.parse(entry.firstSeen);
     if (!Number.isFinite(first)) return false;
     // Everything on a first install is the baseline, not "new".
-    if (this.data.createdAt && entry.firstSeen <= this.data.createdAt) return false;
+    if (entry.baseline) return false;
     return this.now().getTime() - first < this.newBadgeDays * 86_400_000;
   }
 
@@ -206,6 +208,7 @@ export class ModelCatalog {
     const removed: string[] = [];
     const backendErrors: Array<{ backend: string; error: string }> = [];
     const discovered = new Map<string, { adapter: BackendAdapter; model: BackendModel }>();
+    const firstPopulate = !this.populated;
 
     const results = await Promise.all(adapters.map(async (adapter) => {
       try {
@@ -258,6 +261,7 @@ export class ModelCatalog {
             consecutiveFailures: 0,
             successes: 0,
             failures: 0,
+            ...(firstPopulate ? { baseline: true } : {}),
           };
         }
       });

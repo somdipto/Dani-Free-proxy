@@ -4,6 +4,7 @@ import { applyBackendEnvironment, loadConfig } from "./config";
 import { ModelCatalog } from "./catalog";
 import { startRefreshScheduler } from "./refresh-scheduler";
 import { catalogAdapters, startServer } from "./server";
+import { fallbackPorts, listenWithFallback, loadOrCreateInstallKey, readInstallKey, readLiveRuntime, removeRuntime, writeRuntime } from "./install";
 
 const HELP = `Usage: dani-free <command> [options]
 
@@ -12,6 +13,7 @@ Commands:
   status   Check the local router health endpoint
   models   List models exposed by the local router
   refresh  Re-check every backend for new or removed models now
+  key      Print the path of this install's client key file
   doctor   Check router health and model discovery
 
 Options:
@@ -192,18 +194,39 @@ async function runRefresh(config: DaniFreeConfig): Promise<number> {
 async function runStart(config: DaniFreeConfig): Promise<number> {
   applyBackendEnvironment(config);
   const catalog = new ModelCatalog({ path: config.catalogPath });
-  const started = startServer({
+  // Per-install key unless one is configured or auth is explicitly off.
+  const usingInstallKey = !config.apiKey && config.requireKey;
+  const apiKey = config.apiKey ?? (config.requireKey ? loadOrCreateInstallKey(config.apiKeyFile) : undefined);
+  if (!apiKey) console.error("dani-free: client auth is OFF (DANI_FREE_NO_AUTH=1): any local process can use this proxy");
+  const ports = config.strictPort ? [config.port] : fallbackPorts(config.port);
+  const listened = listenWithFallback(ports, (port) => startServer({
     catalog,
     adapters: catalogAdapters(),
     probeOnRefresh: config.probeOnRefresh,
+    privateMode: config.privateMode,
     host: config.host,
-    port: config.port,
-    apiKey: config.apiKey,
+    port,
+    apiKey,
     timeoutMs: config.requestTimeoutMs,
     attemptTimeoutMs: config.attemptTimeoutMs,
     maxBodyBytes: config.bodyLimitBytes,
+  }));
+  const started = listened.value;
+  config.port = started.port;
+  const baseUrl = `${endpoint(config)}/v1`;
+  if (listened.fellBack) console.error(`dani-free: port ${ports[0]} was busy, using ${started.port}`);
+  writeRuntime(config.runtimePath, {
+    pid: process.pid,
+    host: config.host,
+    port: started.port,
+    baseUrl,
+    startedAt: new Date().toISOString(),
+    apiKeyFile: usingInstallKey ? config.apiKeyFile : undefined,
+    privateMode: config.privateMode,
   });
   console.log(`dani-free listening at ${endpoint(config)}`);
+  // One machine-readable line for the embedding app: where to connect and where the key is. Never the key itself.
+  console.log(`DANI_FREE_READY ${JSON.stringify({ baseUrl, port: started.port, pid: process.pid, apiKeyFile: usingInstallKey ? config.apiKeyFile : null, privateMode: config.privateMode })}`);
   // Boot-time refresh plus a daily one. Chat is served from the saved catalog
   // (or live discovery on a first run) while the refresh runs.
   const scheduler = startRefreshScheduler(() => started.router.refreshCatalog(), {
@@ -220,6 +243,7 @@ async function runStart(config: DaniFreeConfig): Promise<number> {
     if (shuttingDown) return;
     shuttingDown = true;
     scheduler.stop();
+    removeRuntime(config.runtimePath);
     started.close(true);
     process.exit(0);
   };
@@ -238,11 +262,18 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
   const config = loadConfig(parsed.configPath);
   if (parsed.host !== undefined) config.host = parsed.host;
   if (parsed.port !== undefined) config.port = parsed.port;
+  if (parsed.command !== "start") {
+    // Client commands follow the running proxy (it may have moved port) and use this install's key.
+    const runtime = readLiveRuntime(config.runtimePath);
+    if (runtime && parsed.port === undefined && process.env.DANI_FREE_PORT === undefined) config.port = runtime.port;
+    if (!config.apiKey) config.apiKey = readInstallKey(config.apiKeyFile);
+  }
   switch (parsed.command) {
     case "start": return runStart(config);
     case "status": return runStatus(config);
     case "models": return runModels(config);
     case "refresh": return runRefresh(config);
+    case "key": console.log(config.apiKeyFile); return 0;
     case "doctor": return runDoctor(config);
     default: throw new Error(`unknown command: ${parsed.command}`);
   }

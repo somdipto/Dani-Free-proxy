@@ -64,6 +64,8 @@ function prioritizeFreeModels(models: BackendModel[]): BackendModel[] {
 export interface KiloAdapterOptions {
   baseUrl?: string;
   apiKey?: string;
+  /** Skip models that may train on prompts. Defaults to DANI_FREE_PRIVATE_MODE=1. */
+  privateMode?: boolean;
   fetcher?: typeof globalThis.fetch;
 }
 
@@ -116,6 +118,7 @@ export class KiloAdapter implements BackendAdapter {
 
   private readonly apiKey?: string;
   private readonly fetcher: typeof globalThis.fetch;
+  readonly privateMode: boolean;
 
   constructor(options: KiloAdapterOptions = {}) {
     this.baseUrl = normalizeBaseUrl(
@@ -123,6 +126,7 @@ export class KiloAdapter implements BackendAdapter {
     );
     this.apiKey = normalizeSecret(options.apiKey ?? readEnvironment("DANI_FREE_KILO_API_KEY"));
     this.fetcher = options.fetcher ?? globalThis.fetch.bind(globalThis);
+    this.privateMode = options.privateMode ?? readEnvironment("DANI_FREE_PRIVATE_MODE") === "1";
   }
 
   async listModels(signal?: AbortSignal): Promise<BackendModel[]> {
@@ -136,7 +140,7 @@ export class KiloAdapter implements BackendAdapter {
     if (!rows) throw new Error("Kilo gateway returned an invalid /models response: expected a data array");
     const today = new Date().toISOString().slice(0, 10);
     const freeIds = new Set(
-      rows.flatMap((row) => (isRecord(row) && isUsableFreeRow(row, today) ? [row.id as string] : [])),
+      rows.flatMap((row) => (isRecord(row) && isUsableFreeRow(row, today, { privateMode: this.privateMode }) ? [row.id as string] : [])),
     );
     const models = parseModels(payload);
     // Dynamic: any currently free, unexpired chat model the gateway lists today,
@@ -262,10 +266,22 @@ function hasZeroPrice(row: Record<string, unknown>): boolean {
   return prompt === 0 && completion === 0;
 }
 
+/**
+ * Private mode also drops ids whose data handling we cannot know up front:
+ * pool routers that pick a provider per request, and unnamed "stealth" models.
+ */
+const PRIVATE_MODE_EXCLUDED = /^(kilo-auto\/|stealth\/)/;
+
+export interface FreeRowOptions {
+  /** Skip every model the gateway marks as possibly training on prompts. */
+  privateMode?: boolean;
+}
+
 /** A model we can offer as free right now: marked free (or zero-priced / canonical), not expired, text-out chat. */
-export function isUsableFreeRow(row: Record<string, unknown>, today: string): boolean {
+export function isUsableFreeRow(row: Record<string, unknown>, today: string, options: FreeRowOptions = {}): boolean {
   const id = typeof row.id === "string" ? row.id : "";
   if (!id || EXCLUDED_FREE_IDS.has(id) || NON_CHAT_ID.test(id)) return false;
+  if (options.privateMode && (row.mayTrainOnYourPrompts !== false || PRIVATE_MODE_EXCLUDED.test(id))) return false;
   const free = row.isFree === true
     || (row.isFree === undefined && (hasZeroPrice(row) || id.endsWith(":free") || CANONICAL_FREE_MODEL_SET.has(id)));
   if (!free) return false;
