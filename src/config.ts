@@ -147,11 +147,14 @@ export interface ConfigDefaultOverrides {
 
 /** Load defaults, optional JSON config, then environment overrides. Secrets are never logged by this module. */
 export function loadConfig(configPath?: string, defaults: ConfigDefaultOverrides = {}): DaniFreeConfig {
+  // DANI_FREE_HOME relocates everything (optional config.json, catalog, api-key, runtime.json),
+  // e.g. under an embedding app's data folder. Its config.json is optional.
+  const home = env("DANI_FREE_HOME");
   const configuredPath = configPath ?? env("DANI_FREE_CONFIG");
-  const selectedPath = resolve(configuredPath ?? DEFAULT_CONFIG_PATH);
+  const selectedPath = resolve(configuredPath ?? (home ? join(home, "config.json") : DEFAULT_CONFIG_PATH));
   const file = readConfigFile(selectedPath, configuredPath !== undefined);
   const host = env("DANI_FREE_HOST") ?? stringValue(file.host, "host") ?? DEFAULTS.host;
-  const port = numberValue(env("DANI_FREE_PORT") ?? file.port, "port", 1, 65_535) ?? defaults.port ?? DEFAULTS.port;
+  const port = numberValue(env("DANI_FREE_PORT") ?? file.port, "port", 0, 65_535) ?? defaults.port ?? DEFAULTS.port;
   const requestTimeoutMs = numberValue(env("DANI_FREE_REQUEST_TIMEOUT_MS") ?? file.requestTimeoutMs, "requestTimeoutMs", 100, 300_000) ?? defaults.requestTimeoutMs ?? DEFAULTS.requestTimeoutMs;
   const attemptTimeoutMs = numberValue(env("DANI_FREE_ATTEMPT_TIMEOUT_MS") ?? file.attemptTimeoutMs, "attemptTimeoutMs", 5_000, 300_000) ?? DEFAULTS.attemptTimeoutMs;
   const bodyLimitBytes = numberValue(env("DANI_FREE_BODY_LIMIT_BYTES") ?? file.bodyLimitBytes, "bodyLimitBytes", 1_024, 100 * 1024 * 1024) ?? DEFAULTS.bodyLimitBytes;

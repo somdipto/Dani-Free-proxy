@@ -239,16 +239,32 @@ async function runStart(config: DaniFreeConfig): Promise<number> {
     onError: (error) => console.error(`[catalog] refresh failed: ${error instanceof Error ? error.message : String(error)}`),
   });
   let shuttingDown = false;
+  let watchdog: ReturnType<typeof setInterval> | undefined;
   const shutdown = () => {
     if (shuttingDown) return;
     shuttingDown = true;
     scheduler.stop();
+    if (watchdog) clearInterval(watchdog);
     removeRuntime(config.runtimePath);
     started.close(true);
     process.exit(0);
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
+  // Parent-death watchdog for embedding apps (works on Windows too, where there is no SIGTERM):
+  // exit within ~2s once the parent process is gone, so a crashed app never leaves an orphan proxy.
+  const parentPid = Number(process.env.DANI_FREE_PARENT_PID);
+  if (Number.isInteger(parentPid) && parentPid > 0) {
+    watchdog = setInterval(() => {
+      try {
+        process.kill(parentPid, 0);
+      } catch (error) {
+        if ((error as { code?: string }).code === "EPERM") return;
+        console.error(`dani-free: parent process ${parentPid} is gone, exiting`);
+        shutdown();
+      }
+    }, 2_000);
+  }
   await new Promise<void>(() => undefined);
   return 0;
 }

@@ -51,6 +51,9 @@ Dani-Free is a small Bun/TypeScript local OpenAI-compatible router. The standard
 - **Per-install key:** `dani-free start` creates a random 256-bit client key the first time (`~/.config/dani-free/api-key`, mode 600) and requires it on every request (`Authorization: Bearer <key>` or `x-api-key`). A configured `DANI_FREE_API_KEY` wins. `DANI_FREE_NO_AUTH=1` turns auth off (not recommended). `dani-free key` prints the key file's path.
 - **Port fallback:** if the port (default 4190) is busy, it tries the next nine, then any free port. `DANI_FREE_STRICT_PORT=1` fails instead.
 - **Ready line:** once it's listening, stdout prints one line, `DANI_FREE_READY {"baseUrl":…,"port":…,"pid":…,"apiKeyFile":…,"privateMode":…}`. It never prints the key itself. The same data goes to `~/.config/dani-free/runtime.json` while it runs, and that file is removed on shutdown. `status`, `models` and `refresh` follow it automatically.
+- **Relocate state:** `DANI_FREE_HOME=<dir>` keeps `config.json` (optional), `catalog.json`, `api-key` and `runtime.json` in that folder, e.g. an app's data directory. `DANI_FREE_PORT=0` picks any free port.
+- **Parent watchdog:** `DANI_FREE_PARENT_PID=<pid>` makes the proxy exit on its own within about 2s after that process dies. This works on Windows too, where there is no SIGTERM. On mac/linux, SIGTERM/SIGINT shut it down cleanly (exit 0). Startup errors exit 1 with a `dani-free: …` line on stderr.
+- **CI:** `.github/workflows/binaries.yml` tests, builds all binaries with a pinned Bun, and smoke-tests each one on its real OS (linux, mac Intel, mac Apple Silicon, windows).
 - **Private mode:** `DANI_FREE_PRIVATE_MODE=1` (or `"privateMode": true`) skips every model the gateway marks as possibly training on prompts, plus pool routers and stealth models. As of 2026-09-25 that is every free Kilo model, so Private mode needs a provider key to have any models. Without one, chat returns a clear `503 no_models_available`.
 
 ## Requirements

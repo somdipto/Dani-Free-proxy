@@ -1,0 +1,84 @@
+name: binaries
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun test
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bash scripts/build-binaries.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dani-free-binaries
+          path: dist/
+          if-no-files-found: error
+
+  # Run each binary on its real OS: start, ready line, key-guarded /v1/models, clean shutdown.
+  smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            bin: dani-free-linux-x64
+          - os: macos-13
+            bin: dani-free-darwin-x64
+          - os: macos-14
+            bin: dani-free-darwin-arm64
+          - os: windows-latest
+            bin: dani-free-windows-x64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dani-free-binaries
+          path: dist
+      - name: Smoke test
+        shell: bash
+        env:
+          DANI_FREE_HOME: ${{ runner.temp }}/dani-free-home
+          DANI_FREE_PORT: "0"
+          DANI_FREE_PROBE_ON_REFRESH: "0"
+        run: |
+          set -euo pipefail
+          chmod +x "dist/${{ matrix.bin }}" || true
+          "dist/${{ matrix.bin }}" --help | grep -q "dani-free"
+          "dist/${{ matrix.bin }}" start > out.log 2> err.log &
+          for i in $(seq 1 60); do grep -q DANI_FREE_READY out.log && break; sleep 1; done
+          line=$(grep DANI_FREE_READY out.log)
+          echo "$line"
+          base=$(echo "$line" | sed -E 's/.*"baseUrl":"([^"]+)".*/\1/')
+          keyfile="$DANI_FREE_HOME/api-key"
+          test -s "$keyfile"
+          key=$(tr -d '\r\n' < "$keyfile")
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$base/models")" = "401"
+          curl -fsS -H "authorization: Bearer $key" "$base/models" | grep -q '"id":"auto"'
+          "dist/${{ matrix.bin }}" status
+          "dist/${{ matrix.bin }}" refresh
+          cat err.log

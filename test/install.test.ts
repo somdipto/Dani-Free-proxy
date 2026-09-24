@@ -146,3 +146,33 @@ describe("dani-free start (real process)", () => {
     }
   }, 20_000);
 });
+
+describe("embedding controls", () => {
+  it("DANI_FREE_HOME relocates all state without needing a config file, and the parent watchdog exits", async () => {
+    const home = join(dir(), "app-data", "proxy");
+    const parent = Bun.spawn({ cmd: ["sleep", "30"] });
+    const payload = { data: [] };
+    const gateway = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json(payload) });
+    const child = Bun.spawn({
+      cmd: [process.execPath, "run", join(import.meta.dir, "..", "src", "cli.ts"), "start"],
+      env: { ...process.env, DANI_FREE_HOME: home, DANI_FREE_CONFIG: "", DANI_FREE_PORT: "0", DANI_FREE_PARENT_PID: String(parent.pid), DANI_FREE_KILO_BASE_URL: `http://127.0.0.1:${gateway.port}` },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    try {
+      const deadline = Date.now() + 10_000;
+      while (!existsSync(join(home, "runtime.json")) && Date.now() < deadline) await Bun.sleep(50);
+      expect(existsSync(join(home, "api-key"))).toBe(true);
+      expect(existsSync(join(home, "runtime.json"))).toBe(true);
+      parent.kill();
+      await parent.exited;
+      const code = await Promise.race([child.exited, Bun.sleep(6_000).then(() => "timeout")]);
+      expect(code).toBe(0);
+      expect(existsSync(join(home, "runtime.json"))).toBe(false);
+    } finally {
+      child.kill();
+      parent.kill();
+      gateway.stop(true);
+    }
+  }, 20_000);
+});

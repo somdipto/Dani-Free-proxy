@@ -78,6 +78,7 @@ export function isAddressInUse(error: unknown): boolean {
 
 /** Preferred port first, then the next nine, then any free port (0). */
 export function fallbackPorts(preferred: number): number[] {
+  if (preferred === 0) return [0];
   const ports = [preferred];
   for (let offset = 1; offset <= 9; offset += 1) if (preferred + offset <= 65_535) ports.push(preferred + offset);
   ports.push(0);
