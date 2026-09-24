@@ -8,6 +8,13 @@ import type {
 } from "../types.ts";
 import { readCappedJson } from "./capped-json";
 import { retryAfterMs } from "../retry-after";
+import {
+  parseToolOutput,
+  renderAssistantToolCalls,
+  renderToolResultPrefix,
+  toolInstructions,
+  type EmulatedToolCall,
+} from "./tool-emulation";
 
 /**
  * OpenCode backend adapter.
@@ -34,6 +41,7 @@ const SERVER_USERNAME = "opencode";
 const SESSION_TITLE = "dani-free";
 const PROVIDER_ID = "opencode";
 const HEALTH_CHECK_TIMEOUT_MS = 10_000;
+const PERMISSION_POLL_MS = 300;
 
 type UnknownRecord = Record<string, unknown>;
 type FetchFn = typeof fetch;
@@ -191,6 +199,7 @@ function messageContentText(message: ChatMessage): string {
 interface SessionMessageParts {
   system: string;
   parts: Array<{ type: "text"; text: string }>;
+  model?: { providerID: string; modelID: string };
 }
 
 /**
@@ -198,7 +207,7 @@ interface SessionMessageParts {
  * messages join into `system`; every other message becomes one text part
  * prefixed with its role (tool content is carried as JSON).
  */
-function toSessionMessage(messages: ChatMessage[]): SessionMessageParts {
+function toSessionMessage(messages: ChatMessage[], request?: ChatRequest): SessionMessageParts {
   const system: string[] = [];
   const parts: Array<{ type: "text"; text: string }> = [];
   for (const message of messages) {
@@ -207,18 +216,27 @@ function toSessionMessage(messages: ChatMessage[]): SessionMessageParts {
       if (text !== "") system.push(text);
       continue;
     }
-    const prefix = message.role === "assistant" ? "assistant: " : message.role === "tool" ? "tool: " : "user: ";
+    let prefix = message.role === "assistant" ? "assistant: " : "user: ";
     let body = text;
-    if (message.role === "tool" && typeof message.content !== "string") {
-      try {
-        body = JSON.stringify(message.content) ?? "";
-      } catch {
-        body = text;
+    if (message.role === "tool") {
+      prefix = renderToolResultPrefix(message);
+      if (typeof message.content !== "string") {
+        try {
+          body = JSON.stringify(message.content) ?? "";
+        } catch {
+          body = text;
+        }
       }
+    }
+    if (message.role === "assistant") {
+      const calls = renderAssistantToolCalls(message);
+      if (calls) body = body ? `${body}\n${calls}` : calls;
     }
     const combined = `${prefix}${body}`;
     if (combined.trim() !== "") parts.push({ type: "text", text: combined });
   }
+  const tools = request ? toolInstructions(request) : "";
+  if (tools) system.push(tools);
   return { system: system.join("\n\n"), parts };
 }
 
@@ -231,6 +249,30 @@ function extractText(message: unknown): string {
     .filter((part): part is UnknownRecord => isRecord(part) && part.type === "text" && typeof part.text === "string")
     .map((part) => part.text as string)
     .join("");
+}
+
+/**
+ * A turn the sidecar finished with an upstream error (info.error): the free
+ * tier's quota or rate limit, a FreeTierError, a provider outage. Surface it
+ * with its status so the router can fail over and put the backend on hold.
+ */
+function messageError(message: unknown): OpenCodeError | undefined {
+  if (!isRecord(message)) return undefined;
+  const info = isRecord(message.info) ? message.info : undefined;
+  const error = info && isRecord(info.error) ? info.error : undefined;
+  if (!error) return undefined;
+  const data = isRecord(error.data) ? error.data : {};
+  const name = typeof error.name === "string" ? error.name : "error";
+  const text = typeof data.message === "string" ? data.message : name;
+  const body = typeof data.responseBody === "string" ? data.responseBody : "";
+  let status = typeof data.statusCode === "number" ? data.statusCode : undefined;
+  const headers = isRecord(data.responseHeaders) ? data.responseHeaders : {};
+  const retryHeader = typeof headers["retry-after"] === "string" ? headers["retry-after"] : undefined;
+  const retry = retryHeader ? retryAfterMs(new Headers({ "retry-after": retryHeader })) : undefined;
+  const quota = /quota|rate.?limit|too many requests|limit (?:reached|exceeded)|usage limit|out of credits|insufficient credits/i.test(`${text} ${body}`);
+  if (quota && (status === undefined || status === 403 || status >= 500)) status = 429;
+  const code = quota ? "quota_exhausted" : /FreeTierError/.test(body) ? "free_tier_rejected" : "upstream_error";
+  return new OpenCodeError(`OpenCode turn failed: ${text}`, { status: status ?? 502, code, retryAfterMs: retry });
 }
 
 interface SessionUsage {
@@ -265,7 +307,7 @@ function completionId(): string {
  * return a single application/json body so clients with `stream: false`
  * (or stream absent) get a parseable response.
  */
-function chatCompletionJson(text: string, modelId: string, usage?: SessionUsage): Response {
+function chatCompletionJson(text: string, modelId: string, usage?: SessionUsage, toolCalls: EmulatedToolCall[] = []): Response {
   return Response.json({
     id: completionId(),
     object: "chat.completion",
@@ -274,8 +316,10 @@ function chatCompletionJson(text: string, modelId: string, usage?: SessionUsage)
     choices: [
       {
         index: 0,
-        message: { role: "assistant", content: text },
-        finish_reason: "stop",
+        message: toolCalls.length
+          ? { role: "assistant", content: text === "" ? null : text, tool_calls: toolCalls }
+          : { role: "assistant", content: text },
+        finish_reason: toolCalls.length ? "tool_calls" : "stop",
       },
     ],
     usage: {
@@ -292,7 +336,7 @@ function chatCompletionJson(text: string, modelId: string, usage?: SessionUsage)
  * OpenAI SSE stream: role+content deltas, a stop chunk with usage, then
  * [DONE].
  */
-function synthesizeSse(text: string, modelId: string, usage?: SessionUsage): Response {
+function synthesizeSse(text: string, modelId: string, usage?: SessionUsage, toolCalls: EmulatedToolCall[] = []): Response {
   const encoder = new TextEncoder();
   const created = Math.floor(Date.now() / 1000);
   const base = { id: completionId(), object: "chat.completion.chunk" as const, created, model: modelId };
@@ -308,10 +352,22 @@ function synthesizeSse(text: string, modelId: string, usage?: SessionUsage): Res
       }),
     );
   }
+  toolCalls.forEach((call, index) => {
+    frames.push(
+      sseData({
+        ...base,
+        choices: [{
+          index: 0,
+          delta: { tool_calls: [{ index, id: call.id, type: "function", function: { name: call.function.name, arguments: call.function.arguments } }] },
+          finish_reason: null,
+        }],
+      }),
+    );
+  });
   frames.push(
     sseData({
       ...base,
-      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      choices: [{ index: 0, delta: {}, finish_reason: toolCalls.length ? "tool_calls" : "stop" }],
       ...(usage
         ? {
             usage: {
@@ -357,26 +413,35 @@ export interface OpenCodeAdapterOptions {
   apiKey?: string;
   /** Injectable fetch for tests. Defaults to global fetch. */
   fetch?: FetchFn;
+  /** Live sidecar location (a managed sidecar can move ports on restart). Wins over baseUrl. */
+  resolveBaseUrl?: () => string | undefined;
+}
+
+function parseBase(value: string | undefined): URL | null {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value.trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("unsupported URL scheme");
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 
 export class OpenCodeAdapter implements BackendAdapter {
   readonly id = BACKEND;
-  private readonly baseUrl: URL | null;
+  private readonly staticBaseUrl: URL | null;
+  private readonly resolveBaseUrl?: () => string | undefined;
   private readonly basicAuth: string | undefined;
   private readonly fetchFn: FetchFn;
 
   constructor(options: OpenCodeAdapterOptions = {}) {
     const configuredBase = options.baseUrl ?? process.env.DANI_FREE_OPENCODE_BASE_URL ?? DEFAULT_BASE_URL;
-    try {
-      const parsed = new URL(configuredBase.trim());
-      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("unsupported URL scheme");
-      parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
-      parsed.search = "";
-      parsed.hash = "";
-      this.baseUrl = parsed;
-    } catch {
-      this.baseUrl = null;
-    }
+    this.staticBaseUrl = parseBase(configuredBase);
+    this.resolveBaseUrl = options.resolveBaseUrl;
 
     const configuredKey = options.apiKey ?? process.env.DANI_FREE_OPENCODE_API_KEY;
     const trimmed = configuredKey?.trim();
@@ -384,6 +449,10 @@ export class OpenCodeAdapter implements BackendAdapter {
       ? `Basic ${Buffer.from(`${SERVER_USERNAME}:${trimmed}`, "utf8").toString("base64")}`
       : undefined;
     this.fetchFn = options.fetch ?? fetch;
+  }
+
+  private get baseUrl(): URL | null {
+    return this.resolveBaseUrl ? parseBase(this.resolveBaseUrl()) : this.staticBaseUrl;
   }
 
   private headers(contentType = false): Headers {
@@ -686,6 +755,44 @@ export class OpenCodeAdapter implements BackendAdapter {
     }
   }
 
+  /**
+   * OpenCode's free tier only answers when its own tool set is offered, so the
+   * sidecar runs with every permission set to "ask" and this loop rejects each
+   * request from our session. The sidecar never edits, runs, reads or fetches
+   * anything on this machine; the caller's tools go through the text protocol.
+   */
+  private rejectToolRequests(sessionId: string, signal: AbortSignal): { stop: () => void } {
+    let stopped = false;
+    const handled = new Set<string>();
+    const loop = async () => {
+      while (!stopped && !signal.aborted) {
+        for (const kind of ["permission", "question"] as const) {
+          try {
+            const response = await this.fetchFn(joinUrl(this.baseUrl!, `/${kind}`), { method: "GET", headers: this.headers(), signal });
+            if (!response.ok) continue;
+            const pending: unknown = await response.json().catch(() => []);
+            if (!Array.isArray(pending)) continue;
+            for (const item of pending) {
+              if (!isRecord(item) || item.sessionID !== sessionId || typeof item.id !== "string" || handled.has(item.id)) continue;
+              handled.add(item.id);
+              const path = kind === "permission" ? `/permission/${item.id}/reply` : `/question/${item.id}/reject`;
+              const body = kind === "permission"
+                ? JSON.stringify({ reply: "reject", message: "Built-in tools are switched off here. Use the host tools protocol or answer in text." })
+                : "{}";
+              await this.fetchFn(joinUrl(this.baseUrl!, path), { method: "POST", headers: this.headers(true), body, signal }).catch(() => undefined);
+            }
+          } catch {
+            /* keep polling until the turn ends */
+          }
+        }
+        if (stopped || signal.aborted) break;
+        await new Promise((resolve) => setTimeout(resolve, PERMISSION_POLL_MS));
+      }
+    };
+    if (this.baseUrl) void loop();
+    return { stop: () => { stopped = true; } };
+  }
+
   /** Best-effort session cleanup; never throws. */
   private async deleteSession(sessionId: string): Promise<void> {
     if (!this.baseUrl) return;
@@ -707,7 +814,7 @@ export class OpenCodeAdapter implements BackendAdapter {
     const rawId = rawModelId(model.id);
     if (!rawId) throw new OpenCodeError("OpenCode model id is empty", { status: 422, code: "invalid_model" });
 
-    const { system, parts } = toSessionMessage(request.messages);
+    const { system, parts } = toSessionMessage(request.messages, request);
     if (parts.length === 0 && system === "") {
       throw new OpenCodeError("no message content to send to OpenCode", { status: 422, code: "invalid_request" });
     }
@@ -723,7 +830,15 @@ export class OpenCodeAdapter implements BackendAdapter {
     signal.addEventListener("abort", onAbort, { once: true });
     try {
       sessionId = await this.createSession(rawId, signal);
-      const message = await this.postMessage(sessionId, { system, parts }, signal);
+      const watcher = this.rejectToolRequests(sessionId, signal);
+      let message: unknown;
+      try {
+        message = await this.postMessage(sessionId, { system, parts, model: { providerID: PROVIDER_ID, modelID: rawId } }, signal);
+      } finally {
+        watcher.stop();
+      }
+      const failure = messageError(message);
+      if (failure) throw failure;
       const text = extractText(message);
       if (text.trim() === "") {
         throw new OpenCodeError("model produced no text output", {
@@ -732,8 +847,9 @@ export class OpenCodeAdapter implements BackendAdapter {
         });
       }
       const usage = extractUsage(message);
-      if (request.stream) return synthesizeSse(text, model.id, usage);
-      return chatCompletionJson(text, model.id, usage);
+      const parsed = parseToolOutput(text, request);
+      if (request.stream) return synthesizeSse(parsed.content, model.id, usage, parsed.toolCalls);
+      return chatCompletionJson(parsed.content, model.id, usage, parsed.toolCalls);
     } finally {
       signal.removeEventListener("abort", onAbort);
       if (sessionId) await this.deleteSession(sessionId);

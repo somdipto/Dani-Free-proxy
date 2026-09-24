@@ -44,8 +44,21 @@ export interface CatalogEntry {
   baseline?: boolean;
 }
 
+/**
+ * A whole backend is out of free quota (not one model rate-limited): every
+ * model on it is skipped until `until`, then it is probed and brought back on
+ * the first success.
+ */
+export interface BackendQuota {
+  until: string;
+  since: string;
+  reason: string;
+  hits: number;
+}
+
 export interface CatalogFile {
   version: 1;
+  backendQuota?: Record<string, BackendQuota>;
   /** When the first refresh populated this catalog; models present then are not flagged new. */
   createdAt?: string;
   refreshedAt?: string;
@@ -68,6 +81,9 @@ export interface FailureInfo {
 }
 
 const DEFAULT_COOLDOWN_MS = 60_000;
+/** First hold when a backend's free quota runs out with no Retry-After. Doubles per repeat hit, up to 6h. */
+export const DEFAULT_QUOTA_HOLD_MS = 30 * 60_000;
+export const MAX_QUOTA_HOLD_MS = 6 * 60 * 60_000;
 const MAX_COOLDOWN_MS = 15 * 60_000;
 
 /** True when a failure reason or status is a rate limit (HTTP 429 or a rate-limit code). */
@@ -99,8 +115,9 @@ export interface CatalogOptions {
 
 const LATENCY_WEIGHT = 0.3;
 
+/** Same shape the router uses: ids that already carry their backend prefix (OpenCode) are not prefixed twice. */
 export function selectorOf(model: Pick<BackendModel, "backend" | "id">): string {
-  return `${model.backend}/${model.id}`;
+  return model.id.startsWith(`${model.backend}/`) ? model.id : `${model.backend}/${model.id}`;
 }
 
 export class ModelCatalog {
@@ -152,7 +169,56 @@ export class ModelCatalog {
     return this.now().getTime() - first < this.newBadgeDays * 86_400_000;
   }
 
-  /** Selectors in auto order: healthy first, then fewer recent failures, then backend priority, then discovery order. */
+  /** Backends currently out of free quota. */
+  exhaustedBackends(): string[] {
+    const nowIso = this.now().toISOString();
+    return Object.entries(this.data.backendQuota ?? {})
+      .filter(([, quota]) => quota.until > nowIso)
+      .map(([backend]) => backend);
+  }
+
+  /** Backends whose quota hold has passed but have not answered since: due for a recovery probe. */
+  backendsDueForProbe(): string[] {
+    const nowIso = this.now().toISOString();
+    return Object.entries(this.data.backendQuota ?? {})
+      .filter(([, quota]) => quota.until <= nowIso)
+      .map(([backend]) => backend);
+  }
+
+  backendQuota(backend: string): BackendQuota | undefined {
+    return this.data.backendQuota?.[backend];
+  }
+
+  /** Put a whole backend on hold for its quota window. Repeated hits back off longer. */
+  recordBackendQuota(backend: string, reason: string, retryAfterMs?: number): void {
+    const now = this.now();
+    const quotas = (this.data.backendQuota ??= {});
+    const previous = quotas[backend];
+    const hits = (previous?.hits ?? 0) + 1;
+    const backoff = Math.min(MAX_QUOTA_HOLD_MS, DEFAULT_QUOTA_HOLD_MS * 2 ** (hits - 1));
+    const wait = retryAfterMs && retryAfterMs > 0 ? Math.min(24 * 60 * 60_000, retryAfterMs) : backoff;
+    quotas[backend] = {
+      until: new Date(now.getTime() + wait).toISOString(),
+      since: previous?.since ?? now.toISOString(),
+      reason: reason.slice(0, 200),
+      hits,
+    };
+    this.saveQuietly();
+  }
+
+  /** The backend answered: its quota is back. Returns true when a hold was lifted. */
+  clearBackendQuota(backend: string): boolean {
+    if (!this.data.backendQuota?.[backend]) return false;
+    delete this.data.backendQuota[backend];
+    this.saveQuietly();
+    return true;
+  }
+
+  /**
+   * Selectors in auto order: healthy first, then fewer recent failures, then
+   * backend priority, then discovery order. Models on a backend that is out of
+   * free quota go last (still there if nothing else is left).
+   */
   ranked(backendPriority: readonly string[] = []): string[] {
     const priority = (backend: string) => {
       const index = backendPriority.indexOf(backend);
@@ -160,10 +226,13 @@ export class ModelCatalog {
     };
     const nowIso = this.now().toISOString();
     const cooling = (entry: CatalogEntry) => (entry.cooldownUntil && entry.cooldownUntil > nowIso ? 1 : 0);
+    const exhausted = new Set(this.exhaustedBackends());
+    const held = (entry: CatalogEntry) => (exhausted.has(entry.backend) ? 1 : 0);
     return this.entries()
       .filter((entry) => !this.isHidden(entry))
       .sort((left, right) =>
-        cooling(left) - cooling(right)
+        held(left) - held(right)
+        || cooling(left) - cooling(right)
         || left.consecutiveFailures - right.consecutiveFailures
         || priority(left.backend) - priority(right.backend)
         || left.order - right.order
@@ -357,7 +426,14 @@ export class ModelCatalog {
     try {
       const parsed = JSON.parse(readFileSync(this.path, "utf8")) as Partial<CatalogFile>;
       if (parsed && parsed.version === 1 && parsed.entries && typeof parsed.entries === "object") {
-        this.data = { version: 1, refreshedAt: parsed.refreshedAt, lastRefreshError: parsed.lastRefreshError, entries: parsed.entries };
+        this.data = {
+          version: 1,
+          createdAt: parsed.createdAt,
+          refreshedAt: parsed.refreshedAt,
+          lastRefreshError: parsed.lastRefreshError,
+          backendQuota: parsed.backendQuota,
+          entries: parsed.entries,
+        };
       }
     } catch {
       // A corrupt catalog is rebuilt by the next refresh; never fatal.

@@ -9,6 +9,11 @@ import { redactDiagnostics } from "../redact";
 import { readCappedJson } from "./capped-json";
 import { retryAfterMs } from "../retry-after";
 
+/** Per-request diagnostics name the backend, so they stay off unless debugging. */
+function kiloLog(line: string): void {
+  if (process.env.DANI_FREE_DEBUG === "1" || process.env.DANI_FREE_EXPOSE_MODELS === "1") console.error(line);
+}
+
 export const KILO_DEFAULT_BASE_URL = "https://api.kilo.ai/api/gateway";
 
 const CANONICAL_FREE_MODEL_IDS = [
@@ -203,16 +208,16 @@ export class KiloAdapter implements BackendAdapter {
       response = await this.fetcher(url, { ...init, headers });
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
-        console.error(`[kilo] aborted ${path} after ${Date.now() - startedAt}ms`);
+        kiloLog(`[kilo] aborted ${path} after ${Date.now() - startedAt}ms`);
         throw error;
       }
       if (error instanceof Error) {
-        console.error(`[kilo] transport failure ${path} after ${Date.now() - startedAt}ms: ${error.message}`);
+        kiloLog(`[kilo] transport failure ${path} after ${Date.now() - startedAt}ms: ${error.message}`);
         throw new Error(`Kilo gateway request failed: ${error.message}`, { cause: error });
       }
       throw new Error(`Kilo gateway request failed: ${String(error)}`);
     }
-    console.error(`[kilo] ${init.method ?? "GET"} ${path} -> ${response.status} in ${Date.now() - startedAt}ms`);
+    kiloLog(`[kilo] ${init.method ?? "GET"} ${path} -> ${response.status} in ${Date.now() - startedAt}ms`);
     if (!response.ok) {
       const body = await readErrorSnippet(response, init.signal ?? undefined);
       throw new KiloBackendError(url, response.status, response.statusText, body, retryAfterMs(response.headers));

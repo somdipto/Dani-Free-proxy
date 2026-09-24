@@ -45,6 +45,20 @@ export interface RouterOptions {
   probeOnRefresh?: boolean;
   /** Reported on /health and used for the empty-catalog message. */
   privateMode?: boolean;
+  /**
+   * Backends whose free quota is shared by all their models: any rate limit or
+   * quota error puts the whole backend on hold and auto moves to the next
+   * backend until a recovery probe succeeds. Default ["opencode"].
+   */
+  quotaBackends?: readonly string[];
+  /**
+   * Product mode: clients only ever see this one model. /v1/models lists just
+   * it, responses carry its id, and errors, headers and /health never name a
+   * backend or model. Omit to expose the real roster (development).
+   */
+  brand?: { id: string; name: string };
+  /** Called when a backend's free quota runs out or comes back. */
+  onQuotaChange?: (backend: string, exhausted: boolean) => void;
 }
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
@@ -177,7 +191,8 @@ function requestApiKey(request: Request): string | undefined {
 
 function modelSelector(selector: string): { auto: true } | { auto: false; backendId?: string; id?: string } {
   const trimmed = selector.trim();
-  if (trimmed.toLowerCase() === "auto") return { auto: true };
+  const lower = trimmed.toLowerCase();
+  if (lower === "auto" || lower === "dani-free-auto" || lower === "dani free auto") return { auto: true };
   const separator = trimmed.indexOf("/");
   if (separator <= 0 || separator === trimmed.length - 1) {
     return { auto: false };
@@ -314,7 +329,8 @@ function opencodeFirst(selectors: string[]): string[] {
   return [...selectors].sort((a, b) => rank(a) - rank(b));
 }
 
-function withModelHeader(response: Response, selector: string): Response {
+function withModelHeader(response: Response, selector: string, brand?: { id: string; names?: () => string[] }): Response {
+  if (brand) return brandedResponse(response, brand.id, brand.names?.() ?? []);
   const headers = new Headers(response.headers);
   headers.set(ANSWERED_MODEL_HEADER, selector);
   return new Response(response.body, {
@@ -323,6 +339,129 @@ function withModelHeader(response: Response, selector: string): Response {
     headers,
   });
 }
+
+/** Drop fields that name the upstream (model, provider, fingerprint) and put the brand id in `model`. */
+const UPSTREAM_WORDS = /\b(?:opencode(?: zen)?|kilo(?: ?code| gateway)?|openrouter|nvidia|zen|mimo|console)\b/gi;
+
+/** Remove backend names and model ids from a message a client will see. */
+export function scrubUpstreamText(text: string, names: readonly string[] = []): string {
+  let out = text;
+  for (const name of [...names].sort((a, b) => b.length - a.length)) {
+    if (name.length >= 3) out = out.split(name).join("model");
+  }
+  return out.replace(UPSTREAM_WORDS, "upstream").replace(/\s{2,}/g, " ").trim();
+}
+
+const brandIds = new Map<string, string>();
+/** Stable opaque id per upstream id, so every frame of one stream shares an id. */
+function brandIdFor(upstreamId: string): string {
+  let id = brandIds.get(upstreamId);
+  if (!id) {
+    id = crypto.randomUUID().replace(/-/g, "").slice(0, 24);
+    brandIds.set(upstreamId, id);
+    if (brandIds.size > 500) brandIds.delete(brandIds.keys().next().value!);
+  }
+  return id;
+}
+
+function brandPayload(value: unknown, brandId: string, names: readonly string[] = []): unknown {
+  if (!isRecord(value)) return value;
+  const copy: Record<string, unknown> = { ...value };
+  if (isRecord(copy.error)) {
+    const error: Record<string, unknown> = { ...copy.error };
+    if (typeof error.message === "string") error.message = scrubUpstreamText(error.message, names);
+    delete error.metadata;
+    delete error.provider;
+    copy.error = error;
+  }
+  delete copy.attempts;
+  if ("model" in copy) copy.model = brandId;
+  delete copy.provider;
+  delete copy.system_fingerprint;
+  delete copy.service_tier;
+  if (typeof copy.id === "string") copy.id = `chatcmpl-${brandIdFor(copy.id)}`;
+  if (isRecord(copy.usage)) {
+    const usage: Record<string, unknown> = { ...copy.usage };
+    for (const key of ["cost", "is_byok", "cost_details"]) delete usage[key];
+    copy.usage = usage;
+  }
+  if (Array.isArray(copy.choices)) {
+    copy.choices = copy.choices.map((choice) => {
+      if (!isRecord(choice)) return choice;
+      const next: Record<string, unknown> = { ...choice };
+      delete next.native_finish_reason;
+      return next;
+    });
+  }
+  return copy;
+}
+
+/**
+ * Rewrite a completion so it never names the model or backend that answered.
+ * SSE is rewritten frame by frame (streaming is preserved); JSON is buffered
+ * and rewritten once. Anything else passes through.
+ */
+function brandedResponse(response: Response, brandId: string, names: readonly string[] = []): Response {
+  // Allowlist: upstream headers (CSP, server, request ids, rate-limit
+  // counters) would name the gateway behind the answer.
+  const headers = new Headers();
+  for (const key of ["content-type", "cache-control", "retry-after"]) {
+    const value = response.headers.get(key);
+    if (value) headers.set(key, value);
+  }
+  const type = (response.headers.get("content-type") ?? "").toLowerCase();
+  if (!response.body || (!type.includes("json") && !type.includes("event-stream"))) {
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+  }
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = "";
+  const sse = type.includes("event-stream");
+  const rewriteLine = (line: string): string => {
+    if (!line.startsWith("data:")) return line;
+    const data = line.slice(5).trim();
+    if (!data || data === "[DONE]") return line;
+    try {
+      return `data: ${JSON.stringify(brandPayload(JSON.parse(data), brandId, names))}`;
+    } catch {
+      return line;
+    }
+  };
+  const transform = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      buffer += decoder.decode(chunk, { stream: true });
+      if (!sse) return;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      if (lines.length) controller.enqueue(encoder.encode(lines.map(rewriteLine).join("\n") + "\n"));
+    },
+    flush(controller) {
+      buffer += decoder.decode();
+      if (sse) {
+        if (buffer) controller.enqueue(encoder.encode(rewriteLine(buffer)));
+        return;
+      }
+      try {
+        controller.enqueue(encoder.encode(JSON.stringify(brandPayload(JSON.parse(buffer), brandId, names))));
+      } catch {
+        controller.enqueue(encoder.encode(buffer));
+      }
+    },
+  });
+  return new Response(response.body.pipeThrough(transform), { status: response.status, statusText: response.statusText, headers });
+}
+
+function backendOf(selector: string): string {
+  const separator = selector.indexOf("/");
+  return separator > 0 ? selector.slice(0, separator) : "";
+}
+
+function retryAfterFromReason(reason: string): number | undefined {
+  const match = reason.match(/\(retry after (\d+)s\)/);
+  return match ? Number(match[1]) * 1_000 : undefined;
+}
+
+const QUOTA_REASON = /quota|usage limit|limit (?:reached|exceeded)|out of credits|insufficient credits|free tier limit/i;
 
 function sanitizeReason(error: unknown, fallback: string): string {
   const raw = error instanceof Error ? error.message : String(error);
@@ -912,6 +1051,9 @@ export class Router {
   readonly probeTimeoutMs: number;
   readonly probeOnRefresh: boolean;
   readonly privateMode: boolean;
+  readonly quotaBackends: ReadonlySet<string>;
+  readonly brand?: { id: string; name: string };
+  private readonly onQuotaChange?: (backend: string, exhausted: boolean) => void;
   private readonly modelCache = new Map<string, {
     expiresAt: number;
     models?: BackendModel[];
@@ -929,10 +1071,77 @@ export class Router {
     this.modelChain = options.modelChain?.map((selector) => selector.trim()).filter((selector) => selector.length > 0);
     this.failoverBackoffMs = options.failoverBackoffMs ?? DEFAULT_FAILOVER_BACKOFF_MS;
     this.catalog = options.catalog;
-    this.backendPriority = options.backendPriority ?? ["kilo", "opencode", "mimo"];
+    this.backendPriority = options.backendPriority ?? ["opencode", "kilo", "mimo"];
+    this.quotaBackends = new Set(options.quotaBackends ?? ["opencode"]);
+    this.brand = options.brand;
+    this.onQuotaChange = options.onQuotaChange;
     this.probeTimeoutMs = options.probeTimeoutMs ?? 20_000;
     this.probeOnRefresh = options.probeOnRefresh ?? true;
     this.privateMode = options.privateMode ?? false;
+  }
+
+  /** True when this failure means the backend's shared free quota is used up. */
+  private isQuotaFailure(item: AttemptFailure): boolean {
+    const backend = backendOf(item.model);
+    if (this.quotaBackends.has(backend)) return isRateLimitFailure(item.status, item.reason) || QUOTA_REASON.test(item.reason);
+    return QUOTA_REASON.test(item.reason);
+  }
+
+  private noteQuota(item: AttemptFailure): void {
+    if (!this.catalog || !this.isQuotaFailure(item)) return;
+    const backend = backendOf(item.model);
+    const wasHeld = this.catalog.exhaustedBackends().includes(backend);
+    this.catalog.recordBackendQuota(backend, item.reason, retryAfterFromReason(item.reason));
+    if (!wasHeld) this.onQuotaChange?.(backend, true);
+  }
+
+  /** Model ids, selectors and names the brand must never reveal. */
+  private brandContext(): { id: string; names: () => string[] } | undefined {
+    if (!this.brand) return undefined;
+    return {
+      id: this.brand.id,
+      names: () => (this.catalog?.entries() ?? []).flatMap((entry) => [entry.selector, entry.id, entry.name]),
+    };
+  }
+
+  private noteAnswered(selector: string): void {
+    if (!this.catalog) return;
+    const backend = backendOf(selector);
+    if (this.catalog.clearBackendQuota(backend)) this.onQuotaChange?.(backend, false);
+  }
+
+  /**
+   * Check whether backends on a quota hold have their free quota back: one
+   * tiny request to the backend's best model once the hold has passed.
+   * Success lifts the hold (auto switches back); another quota answer extends it.
+   */
+  async probeRecovery(signal?: AbortSignal): Promise<string[]> {
+    if (!this.catalog) return [];
+    const recovered: string[] = [];
+    for (const backendId of this.catalog.backendsDueForProbe()) {
+      const adapter = this.findAdapter(backendId);
+      if (!adapter) continue;
+      let models: BackendModel[] = [];
+      try {
+        models = await this.modelsFor(adapter, signal);
+      } catch (error) {
+        if (isAbort(error)) throw error;
+        continue;
+      }
+      const order = this.catalog.ranked(this.backendPriority).filter((selector) => backendOf(selector) === backendId);
+      const model = order.map((selector) => models.find((candidate) => modelSelectorId(candidate) === selector)).find(Boolean) ?? models[0];
+      if (!model) continue;
+      const result = await this.probe(adapter, model, signal ?? new AbortController().signal);
+      const selector = modelSelectorId(model);
+      if (result.ok) {
+        this.catalog.recordSuccess(selector, result.latencyMs);
+        this.noteAnswered(selector);
+        recovered.push(backendId);
+      } else if (result.rateLimited || QUOTA_REASON.test(result.error ?? "")) {
+        this.catalog.recordBackendQuota(backendId, result.error ?? "rate limited", result.retryAfterMs);
+      }
+    }
+    return recovered;
   }
 
   /** Catalog ranking applies only when no explicit roster/chain pins the models. */
@@ -1215,6 +1424,7 @@ export class Router {
       failures.push = (...items: AttemptFailure[]) => {
         for (const item of items) {
           catalog.recordFailure(item.model, item.reason, { rateLimited: isRateLimitFailure(item.status, item.reason) });
+          this.noteQuota(item);
         }
         return push(...items);
       };
@@ -1222,7 +1432,8 @@ export class Router {
     let attemptStartedAt = Date.now();
     const answered = (response: Response, selector: string): Response => {
       catalog?.recordSuccess(selector, Date.now() - attemptStartedAt);
-      return withModelHeader(response, selector);
+      this.noteAnswered(selector);
+      return withModelHeader(response, selector, this.brandContext());
     };
     const required = requiredCapabilities(request);
 
@@ -1234,9 +1445,16 @@ export class Router {
       // the 503 the caller is already going to get.
       const hasNext = index < attempts.length - 1;
       if (signal.aborted) throw abortError(signal);
+      // A backend that ran out of free quota earlier in this request (or
+      // before it) is skipped while anything else is left to try.
+      const held = catalog?.exhaustedBackends() ?? [];
+      if (held.includes(route.model.backend) && attempts.slice(index + 1).some((next) => !held.includes(next.model.backend))) continue;
       if (!supportsCapabilities(route.model, required)) {
+        if (this.brand && attempts.slice(index + 1).some((next) => supportsCapabilities(next.model, required))) continue;
         return structuredError(
-          `Model ${route.model.id} does not support required capabilities: ${required.join(", ")}`,
+          this.brand
+            ? `${this.brand.name} cannot handle this request right now (needs: ${required.join(", ")})`
+            : `Model ${route.model.id} does not support required capabilities: ${required.join(", ")}`,
           422,
           "unsupported_capability",
         );
@@ -1277,10 +1495,17 @@ export class Router {
             status,
             reason: withRetryAfterNote(reason, retryAfterHint),
           });
-          if (hasNext) await this.failoverBackoff(signal, retryAfterHint);
+          // Switching to another backend needs no wait: the limit was not theirs.
+          if (hasNext && attempts[index + 1].model.backend === route.model.backend && !catalog?.exhaustedBackends().includes(route.model.backend)) {
+            await this.failoverBackoff(signal, retryAfterHint);
+          }
           continue;
         }
-        if (status !== undefined && (status === 408 || status >= 500)) {
+        // 401/403 from a backend is that backend refusing us (key, tier,
+        // region), not a bad request: another backend may well answer.
+        const refusedByBackend = (status === 401 || status === 403)
+          && attempts.slice(index + 1).some((next) => next.model.backend !== route.model.backend);
+        if (status !== undefined && (status === 408 || status >= 500 || refusedByBackend)) {
           failures.push({ model: selector, status, reason: retryableStatusReason(error, status, "upstream error") });
           continue;
         }
@@ -1288,7 +1513,7 @@ export class Router {
           // Other 4xx are not retryable: pass the upstream refusal through.
           // responseFromStatusError always builds a Response in this branch:
           // statusFrom already found a status on this error above.
-          return withModelHeader(responseFromStatusError(error)!, selector);
+          return withModelHeader(responseFromStatusError(error)!, selector, this.brandContext());
         }
         failures.push({ model: selector, reason: sanitizeReason(error, "network error") });
         continue;
@@ -1317,7 +1542,7 @@ export class Router {
         continue;
       }
       if (status >= 400) {
-        return withModelHeader(response, selector);
+        return withModelHeader(response, selector, this.brandContext());
       }
       if (status === 204 || status < 200 || status >= 300) {
         // 204, 1xx, and 3xx are never chat answers: a gateway that hands back
@@ -1347,7 +1572,7 @@ export class Router {
           if (isAbort(error)) throw error;
           // A mid-body upstream failure is handed to the client as-is rather
           // than failed over, preserving the upstream's error surface.
-          return withModelHeader(failedBodyResponse(response, error), selector);
+          return withModelHeader(failedBodyResponse(response, error), selector, this.brandContext());
         }
         if (oversize) {
           failures.push({
@@ -1393,10 +1618,7 @@ export class Router {
           failures.push({ model: selector, reason: "upstream returned 200 with empty content" });
           continue;
         }
-        const headers = new Headers(response.headers);
-        headers.set(ANSWERED_MODEL_HEADER, selector);
-        catalog?.recordSuccess(selector, Date.now() - attemptStartedAt);
-        return new Response(text, { status: response.status, statusText: response.statusText, headers });
+        return answered(new Response(text, { status: response.status, statusText: response.statusText, headers: response.headers }), selector);
       }
       // A 2xx whose body is neither JSON nor an SSE stream is not a chat
       // answer: gateways sometimes hand back an HTML error page (WAF blocks,
@@ -1413,12 +1635,16 @@ export class Router {
       }
       return answered(response, selector);
     }
+    if (this.brand) {
+      return structuredError(`${this.brand.name} is busy right now. Try again in a moment.`, 503, "all_models_failed", "api_error");
+    }
     return allModelsFailedResponse(failures);
   }
 
   private async complete(request: ChatRequest, signal: AbortSignal): Promise<Response> {
     const parsed = modelSelector(request.model);
     if (!parsed.auto && (!parsed.backendId || !parsed.id)) {
+      if (this.brand) return this.complete({ ...request, model: "auto" }, signal);
       return structuredError("Model must use auto or backend/model syntax", 400, "invalid_model");
     }
     if (parsed.auto) {
@@ -1443,9 +1669,18 @@ export class Router {
     }
     const selector = request.model.trim();
     const route = await this.resolveExplicit(selector, signal);
-    if (route instanceof Response) return route;
+    if (route instanceof Response) {
+      // Product mode has one public model: anything else a client sends is auto.
+      if (this.brand) return this.complete({ ...request, model: "auto" }, signal);
+      return route;
+    }
     const first = modelSelectorId(route.model);
     const rest = (await this.resolveChain(signal)).filter((candidate) => modelSelectorId(candidate.model) !== first);
+    // Pinned model on a backend that is out of free quota: go straight to the
+    // next best free model, keeping the pinned one as a last resort.
+    if (this.catalog?.exhaustedBackends().includes(route.model.backend)) {
+      return this.completeWithFailover(request, [...rest, route], signal);
+    }
     return this.completeWithFailover(request, [route, ...rest], signal);
   }
 
@@ -1459,6 +1694,18 @@ export class Router {
       const timeout = deadline(request.signal, this.timeoutMs);
       try {
         const backends = await this.health(timeout.signal);
+        if (this.brand) {
+          const usable = this.catalog ? this.catalog.ranked(this.backendPriority).length : 0;
+          const ok = usable > 0 && backends.some((backend) => backend.healthy);
+          return json({
+            ok,
+            status: ok ? "ok" : "degraded",
+            checkedAt: new Date().toISOString(),
+            model: { id: this.brand.id, name: this.brand.name, available: usable > 0 },
+            privateMode: this.privateMode,
+            refreshedAt: this.catalog?.refreshedAt ?? null,
+          });
+        }
         const ok = backends.length > 0 && backends.every((backend) => backend.healthy);
         return json({
           ok,
@@ -1488,6 +1735,7 @@ export class Router {
       }
       try {
         const summary = await this.refreshCatalog(request.signal);
+        if (this.brand && summary) return json({ ok: true, refreshedAt: summary.refreshedAt, available: summary.visible > 0 });
         return json({ ok: true, ...summary });
       } catch (error) {
         if (isAbort(error)) return structuredError("Refresh cancelled", 504, "timeout", "api_error");
@@ -1498,6 +1746,22 @@ export class Router {
       const timeout = deadline(request.signal, this.timeoutMs);
       try {
         const models = await this.models(timeout.signal);
+        if (this.brand) {
+          return json({
+            object: "list",
+            data: [{
+              id: this.brand.id,
+              object: "model",
+              name: this.brand.name,
+              owned_by: "dani",
+              capabilities: [...new Set(models.flatMap((model) => model.capabilities))],
+              contextWindow: Math.max(0, ...models.map((model) => model.contextWindow)),
+              maxTokens: Math.max(0, ...models.map((model) => model.maxTokens)),
+              healthy: models.length > 0,
+              default: true,
+            }],
+          });
+        }
         if (!this.catalog) return json({ object: "list", data: models.map(publicModel) });
         const catalog = this.catalog;
         const auto = {

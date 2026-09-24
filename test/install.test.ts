@@ -103,6 +103,7 @@ describe("dani-free start (real process)", () => {
         DANI_FREE_CONFIG: join(home, "config.json"),
         DANI_FREE_PORT: String(blocker.port),
         DANI_FREE_KILO_BASE_URL: `http://127.0.0.1:${gateway.port}`,
+        DANI_FREE_DISABLE_OPENCODE: "1",
         DANI_FREE_API_KEY: "",
         DANI_FREE_NO_AUTH: "",
       },
@@ -127,7 +128,8 @@ describe("dani-free start (real process)", () => {
       expect((await fetch(`${ready.baseUrl}/models`)).status).toBe(401);
       await Bun.sleep(300);
       const listed = await (await fetch(`${ready.baseUrl}/models`, { headers: { authorization: `Bearer ${key}` } })).json();
-      expect(listed.data[0].id).toBe("auto");
+      expect(listed.data.map((item: { id: string }) => item.id)).toEqual(["dani-free-auto"]);
+      expect(listed.data[0].name).toBe("Dani Free Auto");
       const answer = await fetch(`${ready.baseUrl}/chat/completions`, {
         method: "POST",
         headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
@@ -155,7 +157,7 @@ describe("embedding controls", () => {
     const gateway = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json(payload) });
     const child = Bun.spawn({
       cmd: [process.execPath, "run", join(import.meta.dir, "..", "src", "cli.ts"), "start"],
-      env: { ...process.env, DANI_FREE_HOME: home, DANI_FREE_CONFIG: "", DANI_FREE_PORT: "0", DANI_FREE_PARENT_PID: String(parent.pid), DANI_FREE_KILO_BASE_URL: `http://127.0.0.1:${gateway.port}` },
+      env: { ...process.env, DANI_FREE_HOME: home, DANI_FREE_CONFIG: "", DANI_FREE_PORT: "0", DANI_FREE_PARENT_PID: String(parent.pid), DANI_FREE_KILO_BASE_URL: `http://127.0.0.1:${gateway.port}`, DANI_FREE_DISABLE_OPENCODE: "1" },
       stdout: "pipe",
       stderr: "pipe",
     });

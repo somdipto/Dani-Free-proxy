@@ -255,14 +255,20 @@ describe("server with catalog", () => {
     }
   });
 
-  it("keeps the OpenCode adapter off unless explicitly enabled", () => {
-    const previous = process.env.DANI_FREE_ENABLE_OPENCODE;
-    delete process.env.DANI_FREE_ENABLE_OPENCODE;
+  it("puts OpenCode first with Kilo as fallback, with a kill switch and private-mode opt-out", () => {
+    const saved = { d: process.env.DANI_FREE_DISABLE_OPENCODE, p: process.env.DANI_FREE_PRIVATE_MODE };
+    delete process.env.DANI_FREE_DISABLE_OPENCODE;
+    delete process.env.DANI_FREE_PRIVATE_MODE;
+    expect(catalogAdapters().map((item) => item.id)).toEqual(["opencode", "kilo"]);
+    process.env.DANI_FREE_DISABLE_OPENCODE = "1";
     expect(catalogAdapters().map((item) => item.id)).toEqual(["kilo"]);
-    process.env.DANI_FREE_ENABLE_OPENCODE = "1";
-    expect(catalogAdapters().map((item) => item.id)).toEqual(["kilo", "opencode"]);
-    if (previous === undefined) delete process.env.DANI_FREE_ENABLE_OPENCODE;
-    else process.env.DANI_FREE_ENABLE_OPENCODE = previous;
+    delete process.env.DANI_FREE_DISABLE_OPENCODE;
+    process.env.DANI_FREE_PRIVATE_MODE = "1";
+    expect(catalogAdapters().map((item) => item.id)).toEqual(["kilo"]);
+    for (const [key, value] of [["DANI_FREE_DISABLE_OPENCODE", saved.d], ["DANI_FREE_PRIVATE_MODE", saved.p]] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   });
 });
 

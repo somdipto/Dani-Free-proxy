@@ -3,7 +3,9 @@ import type { DaniFreeConfig } from "./config";
 import { applyBackendEnvironment, loadConfig } from "./config";
 import { ModelCatalog } from "./catalog";
 import { startRefreshScheduler } from "./refresh-scheduler";
-import { catalogAdapters, startServer } from "./server";
+import { catalogAdapters, opencodeEnabled, startServer } from "./server";
+import { OpenCodeSidecar } from "./opencode-sidecar";
+import { dirname } from "node:path";
 import { fallbackPorts, listenWithFallback, loadOrCreateInstallKey, readInstallKey, readLiveRuntime, removeRuntime, writeRuntime } from "./install";
 
 const HELP = `Usage: dani-free <command> [options]
@@ -192,16 +194,35 @@ async function runRefresh(config: DaniFreeConfig): Promise<number> {
 }
 
 async function runStart(config: DaniFreeConfig): Promise<number> {
+  // An OpenCode sidecar URL set by the caller means "use that sidecar"; otherwise we run our own.
+  const externalOpencode = Boolean(process.env.DANI_FREE_OPENCODE_BASE_URL);
   applyBackendEnvironment(config);
   const catalog = new ModelCatalog({ path: config.catalogPath });
   // Per-install key unless one is configured or auth is explicitly off.
   const usingInstallKey = !config.apiKey && config.requireKey;
   const apiKey = config.apiKey ?? (config.requireKey ? loadOrCreateInstallKey(config.apiKeyFile) : undefined);
   if (!apiKey) console.error("dani-free: client auth is OFF (DANI_FREE_NO_AUTH=1): any local process can use this proxy");
+  // Product mode: clients only ever see "Dani Free Auto". DANI_FREE_EXPOSE_MODELS=1 shows the real roster (development).
+  const exposeModels = process.env.DANI_FREE_EXPOSE_MODELS === "1";
+  const brand = exposeModels ? undefined : { id: "dani-free-auto", name: "Dani Free Auto" };
+  const useSidecar = opencodeEnabled() && !externalOpencode;
+  const sidecar = useSidecar
+    ? new OpenCodeSidecar({
+      home: dirname(config.catalogPath),
+      binary: process.env.DANI_FREE_OPENCODE_BIN,
+      noInstall: process.env.DANI_FREE_OPENCODE_NO_INSTALL === "1",
+      log: (line) => { if (exposeModels) console.error(line); },
+    })
+    : undefined;
   const ports = config.strictPort ? [config.port] : fallbackPorts(config.port);
   const listened = listenWithFallback(ports, (port) => startServer({
     catalog,
-    adapters: catalogAdapters(),
+    adapters: catalogAdapters(sidecar ? { opencode: sidecar } : {}),
+    brand,
+    onQuotaChange: (backend, exhausted) => {
+      const label = exposeModels ? backend : backend === "opencode" ? "primary" : "fallback";
+      console.log(exhausted ? `[catalog] ${label} free pool used up, switching to the next pool` : `[catalog] ${label} free pool is back`);
+    },
     probeOnRefresh: config.probeOnRefresh,
     privateMode: config.privateMode,
     host: config.host,
@@ -229,11 +250,38 @@ async function runStart(config: DaniFreeConfig): Promise<number> {
   console.log(`DANI_FREE_READY ${JSON.stringify({ baseUrl, port: started.port, pid: process.pid, apiKeyFile: usingInstallKey ? config.apiKeyFile : null, privateMode: config.privateMode })}`);
   // Boot-time refresh plus a daily one. Chat is served from the saved catalog
   // (or live discovery on a first run) while the refresh runs.
-  const scheduler = startRefreshScheduler(() => started.router.refreshCatalog(), {
+  const refreshAll = async () => {
+    // New OpenCode models appear on their own: refresh OpenCode's list first, then re-list every backend.
+    if (sidecar?.baseUrl) await sidecar.refreshModels().catch(() => false);
+    return started.router.refreshCatalog();
+  };
+  if (sidecar) {
+    void sidecar.start().then(
+      // The boot refresh may still be running without the sidecar: wait for it, then list again.
+      () => started.router.refreshCatalog().catch(() => undefined).then(() => refreshAll()).then(
+        (summary) => { if (summary) console.log(`[catalog] refreshed: ${summary.visible}/${summary.total} models usable`); },
+        () => undefined,
+      ),
+      (error) => console.error(exposeModels ? `[free-backend] could not start: ${error instanceof Error ? error.message : String(error)}` : "[catalog] primary free pool unavailable, using fallback pool"),
+    );
+  }
+  let lastDay = new Date().toDateString();
+  const recovery = setInterval(() => {
+    void started.router.probeRecovery().catch(() => undefined);
+    // Start of each local day: pick up new models even if the app never restarted.
+    const today = new Date().toDateString();
+    if (today !== lastDay) {
+      lastDay = today;
+      void refreshAll().catch(() => undefined);
+    }
+  }, 5 * 60_000);
+  const scheduler = startRefreshScheduler(refreshAll, {
     intervalMs: config.refreshIntervalHours * 60 * 60 * 1000,
     onResult: (summary) => {
       if (!summary) return;
-      const note = summary.backendErrors.length ? ` (backend errors: ${summary.backendErrors.map((item) => item.backend).join(", ")})` : "";
+      const note = summary.backendErrors.length
+        ? exposeModels ? ` (backend errors: ${summary.backendErrors.map((item) => item.backend).join(", ")})` : ` (${summary.backendErrors.length} pool(s) unreachable)`
+        : "";
       console.log(`[catalog] refreshed: ${summary.visible}/${summary.total} models usable, +${summary.added.length} new, -${summary.removed.length} gone${note}`);
     },
     onError: (error) => console.error(`[catalog] refresh failed: ${error instanceof Error ? error.message : String(error)}`),
@@ -244,6 +292,8 @@ async function runStart(config: DaniFreeConfig): Promise<number> {
     if (shuttingDown) return;
     shuttingDown = true;
     scheduler.stop();
+    clearInterval(recovery);
+    sidecar?.stop();
     if (watchdog) clearInterval(watchdog);
     removeRuntime(config.runtimePath);
     started.close(true);

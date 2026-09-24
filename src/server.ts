@@ -40,16 +40,35 @@ export function defaultAdapters(): BackendAdapter[] {
   return [new OpenCodeAdapter(), new KiloAdapter()];
 }
 
+export interface CatalogAdapterOptions {
+  /** Managed `opencode serve` sidecar; its live URL and password feed the OpenCode adapter. */
+  opencode?: { baseUrl: string | undefined; password: string };
+}
+
 /**
- * Adapters for the catalog-driven listener (`dani-free start`). Kilo's free
- * gateway models only by default. The OpenCode sidecar adapter is off unless
- * DANI_FREE_ENABLE_OPENCODE=1: OpenCode states its free tier may not be used
- * from other harnesses, so it is not enabled on anyone's behalf.
+ * Adapters for the catalog-driven listener (`dani-free start`).
+ * OpenCode's free models come first and Kilo's free gateway models are the
+ * automatic fallback. DANI_FREE_DISABLE_OPENCODE=1 is the kill switch: Kilo only.
+ * Private mode leaves OpenCode out too (its free models may be trained on).
+ * Note: OpenCode's docs say its free tier is meant for OpenCode itself; the
+ * owner chose to use it here, and the kill switch exists for that reason.
  */
-export function catalogAdapters(): BackendAdapter[] {
-  const adapters: BackendAdapter[] = [new KiloAdapter()];
-  if (process.env.DANI_FREE_ENABLE_OPENCODE === "1") adapters.push(new OpenCodeAdapter());
+export function catalogAdapters(options: CatalogAdapterOptions = {}): BackendAdapter[] {
+  const adapters: BackendAdapter[] = [];
+  if (opencodeEnabled()) {
+    const sidecar = options.opencode;
+    adapters.push(sidecar
+      ? new OpenCodeAdapter({ resolveBaseUrl: () => sidecar.baseUrl, apiKey: sidecar.password })
+      : new OpenCodeAdapter());
+  }
+  adapters.push(new KiloAdapter());
   return adapters;
+}
+
+export function opencodeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.DANI_FREE_DISABLE_OPENCODE === "1") return false;
+  if (env.DANI_FREE_PRIVATE_MODE === "1") return false;
+  return true;
 }
 
 export function createRouterServer(options: ServerOptions = {}): RouterServer {

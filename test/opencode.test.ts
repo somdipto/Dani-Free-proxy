@@ -208,7 +208,7 @@ describe("OpenCodeAdapter", () => {
     expect(texts).toEqual([
       "user: Reply with exactly: hello",
       "assistant: saying hi",
-      'tool: {"ok":true}',
+      'tool result: {"ok":true}',
     ]);
 
     // no auth header when no key is configured
