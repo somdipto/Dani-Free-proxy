@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { seal, unseal } from "./opacity";
 import type { BackendModel } from "./types";
 
 /**
@@ -87,8 +88,12 @@ export function orderForTask<T extends RankedRoute>(task: Task, routes: T[]): T[
     }
     case "summary":
     case "title":
-      // Light and fast first; anything else after.
-      return stable(routes, (left, right) => (tier(left) === "light" ? 0 : 1) - (tier(right) === "light" ? 0 : 1) || latencyOf(left) - latencyOf(right));
+      // Streaming backends first (the OpenCode sidecar buffers the whole turn: a title took 10s there),
+      // then light and fast; OpenCode stays as the last resort.
+      return stable(routes, (left, right) =>
+        (left.model.backend === "opencode" ? 1 : 0) - (right.model.backend === "opencode" ? 1 : 0)
+        || (tier(left) === "light" ? 0 : 1) - (tier(right) === "light" ? 0 : 1)
+        || latencyOf(left) - latencyOf(right));
     case "tool_repair":
       return stable(routes, (left, right) => TIER_RANK[tier(left)] - TIER_RANK[tier(right)]);
     case "reason":
@@ -122,6 +127,8 @@ export interface FeedbackOptions {
   now?: () => Date;
   /** Events before a model's rank for a task moves at all. Default 20. */
   minEvents?: number;
+  /** When set, the file is written sealed (not plain JSON). */
+  sealKey?: Buffer;
 }
 
 const PENDING_TTL_MS = 60 * 60_000;
@@ -143,9 +150,11 @@ export class FeedbackStore {
   private readonly pending = new Map<string, Pending>();
   private readonly seen = new Set<string>();
   private data: FeedbackFile = { version: 1, stats: {} };
+  private readonly sealKey?: Buffer;
 
   constructor(options: FeedbackOptions = {}) {
     this.path = options.path;
+    this.sealKey = options.sealKey;
     this.now = options.now ?? (() => new Date());
     this.minEvents = options.minEvents ?? 20;
     this.load();
@@ -226,7 +235,7 @@ export class FeedbackStore {
   private load(): void {
     if (!this.path || !existsSync(this.path)) return;
     try {
-      const parsed = JSON.parse(readFileSync(this.path, "utf8")) as FeedbackFile;
+      const parsed = JSON.parse(unseal(readFileSync(this.path, "utf8"), this.sealKey)) as FeedbackFile;
       if (parsed?.version === 1 && parsed.stats && typeof parsed.stats === "object") this.data = parsed;
     } catch {
       /* rebuilt from new feedback */
@@ -238,7 +247,8 @@ export class FeedbackStore {
     try {
       mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
       const temporary = `${this.path}.${process.pid}.tmp`;
-      writeFileSync(temporary, `${JSON.stringify(this.data)}\n`, { mode: 0o600 });
+      const text = `${JSON.stringify(this.data)}\n`;
+      writeFileSync(temporary, this.sealKey ? seal(text, this.sealKey) : text, { mode: 0o600 });
       renameSync(temporary, this.path);
     } catch {
       /* feedback is best effort */

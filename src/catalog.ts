@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { seal, unseal } from "./opacity";
 import type { BackendAdapter, BackendModel, Capability } from "./types";
 
 /**
@@ -42,6 +43,8 @@ export interface CatalogEntry {
   rateLimits?: number;
   /** Present when the catalog was first populated (first install): never flagged new. */
   baseline?: boolean;
+  /** Advertises tools but failed the tool-call smoke check: not used for tool turns. */
+  toolsBroken?: boolean;
 }
 
 /**
@@ -73,6 +76,8 @@ export interface ProbeResult {
   /** The model answered with a rate limit: capacity, not breakage. */
   rateLimited?: boolean;
   retryAfterMs?: number;
+  /** Result of the tool-call smoke check, when one ran. */
+  toolsOk?: boolean;
 }
 
 export interface FailureInfo {
@@ -111,6 +116,14 @@ export interface CatalogOptions {
   newBadgeDays?: number;
   /** Consecutive failed attempts before a model is hidden. Default 3. */
   hideAfterFailures?: number;
+  /** When set, the file is written sealed (not plain JSON); plain files still load. */
+  sealKey?: Buffer;
+  /**
+   * Models that appear after the first install stay out of routing until
+   * they have answered once (the refresh smoke check or a real turn).
+   * Default true.
+   */
+  gateNewModels?: boolean;
 }
 
 const LATENCY_WEIGHT = 0.3;
@@ -127,9 +140,13 @@ export class ModelCatalog {
   private readonly now: () => Date;
   private data: CatalogFile = { version: 1, entries: {} };
   private refreshing?: Promise<RefreshSummary>;
+  private readonly sealKey?: Buffer;
+  readonly gateNewModels: boolean;
 
   constructor(options: CatalogOptions = {}) {
     this.path = options.path;
+    this.sealKey = options.sealKey;
+    this.gateNewModels = options.gateNewModels ?? true;
     this.now = options.now ?? (() => new Date());
     this.newBadgeDays = options.newBadgeDays ?? 7;
     this.hideAfterFailures = options.hideAfterFailures ?? 3;
@@ -159,6 +176,16 @@ export class ModelCatalog {
 
   isHidden(entry: CatalogEntry): boolean {
     return !entry.present || entry.consecutiveFailures >= this.hideAfterFailures;
+  }
+
+  /** Seen after the first install and never answered yet. */
+  awaitingSmokeCheck(entry: CatalogEntry): boolean {
+    return !entry.baseline && entry.successes === 0;
+  }
+
+  /** Failed the tool-call smoke check: keep it off tool turns. */
+  toolsBroken(selector: string): boolean {
+    return this.data.entries[selector]?.toolsBroken === true;
   }
 
   isNew(entry: CatalogEntry): boolean {
@@ -229,8 +256,10 @@ export class ModelCatalog {
     const exhausted = new Set(this.exhaustedBackends());
     const held = (entry: CatalogEntry) => (exhausted.has(entry.backend) ? 1 : 0);
     const proven = (entry: CatalogEntry) => (entry.successes > 0 ? 1 : 0);
-    return this.entries()
-      .filter((entry) => !this.isHidden(entry))
+    const live = this.entries().filter((entry) => !this.isHidden(entry));
+    // New arrivals wait for their smoke check, unless nothing else is left.
+    const gated = this.gateNewModels ? live.filter((entry) => !this.awaitingSmokeCheck(entry)) : live;
+    return (gated.length > 0 ? gated : live)
       .sort((left, right) =>
         held(left) - held(right)
         || cooling(left) - cooling(right)
@@ -370,6 +399,7 @@ export class ModelCatalog {
           try {
             const result = await options.prober!(adapter, model, controller.signal);
             if (result.ok) this.recordSuccessNoSave(selector, result.latencyMs);
+            if (result.toolsOk !== undefined && this.data.entries[selector]) this.data.entries[selector].toolsBroken = !result.toolsOk;
             else this.recordFailureNoSave(selector, result.error ?? "probe failed", { rateLimited: result.rateLimited, retryAfterMs: result.retryAfterMs });
             probed.push({ selector, ok: result.ok, error: result.error });
           } catch (error) {
@@ -434,7 +464,7 @@ export class ModelCatalog {
   private load(): void {
     if (!this.path || !existsSync(this.path)) return;
     try {
-      const parsed = JSON.parse(readFileSync(this.path, "utf8")) as Partial<CatalogFile>;
+      const parsed = JSON.parse(unseal(readFileSync(this.path, "utf8"), this.sealKey)) as Partial<CatalogFile>;
       if (parsed && parsed.version === 1 && parsed.entries && typeof parsed.entries === "object") {
         this.data = {
           version: 1,
@@ -455,10 +485,11 @@ export class ModelCatalog {
     try {
       mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
       const temporary = `${this.path}.${process.pid}.tmp`;
-      writeFileSync(temporary, `${JSON.stringify(this.data, null, 2)}\n`, { mode: 0o600 });
+      const text = `${JSON.stringify(this.data, null, 2)}\n`;
+      writeFileSync(temporary, this.sealKey ? seal(text, this.sealKey) : text, { mode: 0o600 });
       renameSync(temporary, this.path);
     } catch (error) {
-      console.error(`[catalog] could not save ${this.path}: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`[state] could not save ${this.path}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 }

@@ -15,7 +15,8 @@ targets=(
 for entry in "${targets[@]}"; do
   target="${entry%%:*}"; out="${entry#*:}"
   echo "building $out ($target)"
-  bun build src/cli.ts --compile --minify --sourcemap=none --target="$target" --outfile "dist/$out"
+  # Release builds hard-disable the development roster and debug logs (see src/opacity.ts).
+  bun build src/cli.ts --compile --minify --sourcemap=none --define 'process.env.DANI_FREE_RELEASE="1"' --target="$target" --outfile "dist/$out"
 done
 ( cd dist && { command -v sha256sum >/dev/null && sha256sum dani-free-* || shasum -a 256 dani-free-*; } > SHA256SUMS )
 ls -la dist

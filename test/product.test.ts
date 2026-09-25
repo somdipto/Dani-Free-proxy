@@ -282,7 +282,8 @@ describe("task routing", () => {
       { model: model("kilo", "big-120b:free"), latencyMs: 900 },
     ];
     expect(orderForTask("reason", routes).map((r) => r.model.id)).toEqual(["opencode/big-pickle", "big-120b:free", "tiny-2b:free"]);
-    expect(orderForTask("title", routes)[0].model.id).toBe("tiny-2b:free");
+    expect(orderForTask("title", routes).map((r) => r.model.id)).toEqual(["tiny-2b:free", "big-120b:free", "opencode/big-pickle"]);
+    expect(orderForTask("summary", routes).at(-1)!.model.id).toBe("opencode/big-pickle");
     expect(orderForTask("ack", routes).map((r) => r.model.id)).toEqual(["tiny-2b:free", "big-120b:free"]);
     expect(orderForTask("tool_repair", routes)[0].model.id).toBe("big-120b:free");
   });
@@ -399,5 +400,211 @@ describe("api v1 endpoints", () => {
   it("warm answers 204 at once", async () => {
     const { router } = await brandRouter(async (id) => completion(id));
     expect((await router.handle(post("/v1/warm", { task: "ack" }))).status).toBe(204);
+  });
+});
+
+import { IDENTITY_PROMPT, opaqueToolCallId, seal, sealKey, unseal, withIdentity, devExposureAllowed } from "../src/opacity";
+
+describe("model identity opacity", () => {
+  it("adds the Dani Free identity line to every branded request, appended to the app's system prompt", async () => {
+    const seen: ChatRequest[] = [];
+    const time = clock();
+    const catalog = new ModelCatalog({ now: time.now });
+    const kilo = fakeBackend("kilo", ["nex/pro:free"], async (id) => completion(id));
+    const original = kilo.complete.bind(kilo);
+    kilo.complete = async (request: ChatRequest, m: BackendModel, signal?: AbortSignal) => { seen.push(request); return original(request, m, signal as AbortSignal); };
+    const router = createRouter({ adapters: [kilo], catalog, probeOnRefresh: false, brand: { id: "dani-free-auto", name: "Dani Free Auto" } });
+    await router.refreshCatalog();
+    await router.handle(chat({ messages: [{ role: "system", content: "You are Dani." }, { role: "user", content: "which model are you?" }] }));
+    expect(seen[0].messages[0].content).toBe(`You are Dani.\n\n${IDENTITY_PROMPT}`);
+    expect(IDENTITY_PROMPT).toContain("Dani Free");
+    await router.handle(chat());
+    expect(seen[1].messages[0]).toEqual({ role: "system", content: IDENTITY_PROMPT });
+  });
+
+  it("keeps array system content and does not touch dev mode", async () => {
+    const request = withIdentity({ model: "auto", messages: [{ role: "system", content: [{ type: "text", text: "A" }] as never }, { role: "user", content: "hi" }] });
+    expect((request.messages[0].content as unknown as unknown[]).length).toBe(2);
+    const { router, kilo } = await setup(async () => { throw new OpenCodeError("down", { status: 500 }); }, false);
+    const calls: ChatRequest[] = [];
+    const original = kilo.complete.bind(kilo);
+    kilo.complete = async (r: ChatRequest, m: BackendModel, s?: AbortSignal) => { calls.push(r); return original(r, m, s as AbortSignal); };
+    await router.handle(chat());
+    expect(JSON.stringify(calls)).not.toContain("Dani Free");
+  });
+
+  it("drops provider extras and rewrites tool-call ids so nothing hints at the model family", async () => {
+    const { router } = await setup(async () => Response.json({
+      id: "gen-123", object: "chat.completion", created: 1, model: "nemotron-free", provider: "Nvidia", system_fingerprint: "fp_x",
+      choices: [{
+        index: 0, finish_reason: "tool_calls", native_finish_reason: "tool_use", logprobs: { content: [{ token: "Ġhi" }] },
+        message: { role: "assistant", content: null, reasoning_details: [{ format: "anthropic-claude-v1", text: "t" }],
+          tool_calls: [{ id: "toolu_01ABC", type: "function", function: { name: "f", arguments: "{}" } }] },
+      }],
+      usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5, cost: 0, prompt_tokens_details: { cached_tokens: 0 } },
+    }));
+    const text = await (await router.handle(chat())).text();
+    expect(text).not.toMatch(/nemotron|nvidia|toolu_|fp_x|anthropic|claude|logprobs|native_finish|reasoning_details|cost|Ġ/i);
+    const body = JSON.parse(text);
+    expect(body.choices[0].message.tool_calls[0].id).toBe(opaqueToolCallId("toolu_01ABC"));
+    expect(body.choices[0].message.tool_calls[0].id).toMatch(/^call_d[0-9a-f]{23}$/);
+    expect(body.usage).toEqual({ prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 });
+    expect(opaqueToolCallId(body.choices[0].message.tool_calls[0].id)).toBe(body.choices[0].message.tool_calls[0].id);
+  });
+
+  it("scrubs model makers, ids and version strings from error text", () => {
+    expect(scrubUpstreamText("qwen/qwen3-coder:free is rate limited, retry after 30s (HTTP 429)")).toBe("model is rate limited, retry after 30s (HTTP 429)");
+    expect(scrubUpstreamText("Anthropic claude-3.5 said no")).toBe("model said no");
+    expect(scrubUpstreamText("Model cohere/north-mini-code returned 503", ["kilo/cohere/north-mini-code"])).toBe("model returned 503");
+  });
+
+  it("says Dani Free Auto, not a model id, when max_tokens is too high", async () => {
+    const { router } = await setup(async (id) => completion(id));
+    const text = await (await router.handle(chat({ max_tokens: 999_999 }))).text();
+    expect(text).toContain("Dani Free Auto");
+    expect(text).not.toMatch(/nemotron|pickle|nex/i);
+  });
+
+  it("seals state files so model ids are not readable on disk", () => {
+    const key = sealKey("install-key");
+    const sealed = seal('{"entries":{"kilo/nex/pro:free":{}}}', key);
+    expect(sealed).not.toContain("nex");
+    expect(unseal(sealed, key)).toBe('{"entries":{"kilo/nex/pro:free":{}}}');
+    expect(unseal('{"plain":true}', key)).toBe('{"plain":true}');
+    expect(() => unseal(sealed, sealKey("other"))).toThrow();
+  });
+
+  it("the development roster needs a non-release build", () => {
+    expect(devExposureAllowed({ DANI_FREE_EXPOSE_MODELS: "1" })).toBe(process.env.DANI_FREE_RELEASE !== "1");
+    expect(devExposureAllowed({})).toBe(false);
+  });
+});
+
+describe("automatic model updates", () => {
+  it("keeps a model that appeared after install out of routing until it passes the smoke check", async () => {
+    const catalog = new ModelCatalog();
+    const kilo = fakeBackend("kilo", ["old:free"], async (id) => completion(id));
+    let probeOk = false;
+    await catalog.refresh([kilo]);
+    (kilo as { listModels: () => Promise<BackendModel[]> }).listModels = async () => [model("kilo", "old:free"), model("kilo", "new:free")];
+    await catalog.refresh([kilo], { prober: async () => ({ ok: probeOk, latencyMs: 10, error: probeOk ? undefined : "HTTP 500" }) });
+    expect(catalog.ranked()).toEqual(["kilo/old:free"]);
+    probeOk = true;
+    await catalog.refresh([kilo], { prober: async () => ({ ok: probeOk, latencyMs: 10 }) });
+    expect(catalog.ranked()).toContain("kilo/new:free");
+  });
+
+  it("drains a removed model and still serves if only unproven models are left", async () => {
+    const catalog = new ModelCatalog();
+    const kilo = fakeBackend("kilo", ["gone:free"], async (id) => completion(id));
+    await catalog.refresh([kilo]);
+    (kilo as { listModels: () => Promise<BackendModel[]> }).listModels = async () => [model("kilo", "fresh:free")];
+    await catalog.refresh([kilo]);
+    expect(catalog.ranked()).toEqual(["kilo/fresh:free"]);
+  });
+
+  it("keeps a model that fails the tool-call smoke check off tool turns", async () => {
+    const catalog = new ModelCatalog();
+    const good = fakeBackend("kilo", ["good:free"], async (id) => completion(id));
+    await catalog.refresh([good]);
+    (good as { listModels: () => Promise<BackendModel[]> }).listModels = async () => [model("kilo", "good:free"), model("kilo", "badtools:free")];
+    await catalog.refresh([good], { prober: async (_a, m) => ({ ok: true, latencyMs: 5, toolsOk: m.id !== "badtools:free" }) });
+    expect(catalog.toolsBroken("kilo/badtools:free")).toBe(true);
+    const router = createRouter({ adapters: [good], catalog, probeOnRefresh: false, failoverBackoffMs: 1 });
+    good.calls.length = 0;
+    await router.handle(chat({ model: "kilo/badtools:free", tools: [{ type: "function", function: { name: "f", parameters: { type: "object" } } }] } as Partial<ChatRequest>));
+    expect(good.calls).not.toContain("badtools:free");
+  });
+
+  it("the router's smoke check forces one tool call and grades the JSON", async () => {
+    const catalog = new ModelCatalog();
+    const kilo = fakeBackend("kilo", ["seed:free"], async (id) => completion(id));
+    await catalog.refresh([kilo]);
+    const replies: Record<string, (request: ChatRequest) => Response> = {
+      "t-good:free": (request) => request.tools
+        ? Response.json({ id: "1", object: "chat.completion", created: 1, model: "x", choices: [{ index: 0, finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "c", type: "function", function: { name: "get_weather", arguments: "{\"city\":\"Paris\"}" } }] } }] })
+        : completion("x", "ok"),
+      "t-bad:free": (request) => request.tools ? completion("x", "It is sunny.") : completion("x", "ok"),
+    };
+    (kilo as { listModels: () => Promise<BackendModel[]> }).listModels = async () => [model("kilo", "seed:free"), model("kilo", "t-good:free"), model("kilo", "t-bad:free")];
+    kilo.complete = async (request: ChatRequest, m: BackendModel) => (replies[m.id] ?? (() => completion(m.id)))(request);
+    const router = createRouter({ adapters: [kilo], catalog, probeOnRefresh: true });
+    await router.refreshCatalog();
+    expect(catalog.toolsBroken("kilo/t-good:free")).toBe(false);
+    expect(catalog.toolsBroken("kilo/t-bad:free")).toBe(true);
+    expect(catalog.ranked()).toEqual(expect.arrayContaining(["kilo/t-good:free", "kilo/t-bad:free"]));
+  });
+});
+
+import { mkdtempSync, readFileSync as readFs, existsSync as exists, writeFileSync as writeFs, mkdirSync as mkdirFs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
+import { createHash } from "node:crypto";
+import { OpenCodeSidecar, OPENCODE_VERSION, OPENCODE_ASSETS, platformKey, newerVersion } from "../src/opencode-sidecar";
+
+describe("engine auto-update", () => {
+  const key = platformKey()!;
+  const asset = OPENCODE_ASSETS[key];
+  const release = (version: string, publishedAgoMs: number, digest: string) => Response.json({
+    tag_name: `v${version}`, draft: false, prerelease: false, published_at: new Date(Date.now() - publishedAgoMs).toISOString(),
+    assets: [{ name: asset.name, digest: `sha256:${digest}`, browser_download_url: `https://github.com/anomalyco/opencode/releases/download/v${version}/${asset.name}` }],
+  });
+
+  it("compares versions numerically", () => {
+    expect(newerVersion("1.18.40", "1.18.32")).toBe(true);
+    expect(newerVersion("1.19.0", "1.18.32")).toBe(true);
+    expect(newerVersion("1.18.32", "1.18.32")).toBe(false);
+    expect(newerVersion("1.9.99", "1.18.32")).toBe(false);
+  });
+
+  it("stays on the current engine when the latest release is not newer, or is under 48h old", async () => {
+    const home = mkdtempSync(joinPath(tmpdir(), "dfeng-"));
+    let body = () => release(OPENCODE_VERSION, 3 * 86_400_000, "0".repeat(64));
+    const sidecar = new OpenCodeSidecar({ home, fetch: (async () => body()) as unknown as typeof fetch });
+    expect((await sidecar.checkForUpdate()).status).toBe("current");
+    body = () => release("99.0.0", 60 * 60_000, "0".repeat(64));
+    expect((await sidecar.checkForUpdate()).status).toBe("too_new");
+  });
+
+  it("rejects a download whose SHA-256 does not match GitHub's digest, and never retries it", async () => {
+    const home = mkdtempSync(joinPath(tmpdir(), "dfeng-"));
+    let downloads = 0;
+    const fetchFn = (async (url: string) => {
+      if (url.includes("api.github.com")) return release("99.0.0", 3 * 86_400_000, "a".repeat(64));
+      downloads += 1;
+      return new Response(new Uint8Array([1, 2, 3]));
+    }) as unknown as typeof fetch;
+    const sidecar = new OpenCodeSidecar({ home, fetch: fetchFn });
+    const first = await sidecar.checkForUpdate();
+    expect(first.status).toBe("rejected");
+    expect(sidecar.activeVersion).toBe(OPENCODE_VERSION);
+    expect((await sidecar.checkForUpdate()).status).toBe("rejected");
+    expect(downloads).toBe(1);
+    expect(JSON.parse(readFs(joinPath(home, "engine", "engine.json"), "utf8")).rejected).toEqual(["99.0.0"]);
+  });
+
+  it("ignores assets hosted anywhere but the release's own GitHub download path", async () => {
+    const home = mkdtempSync(joinPath(tmpdir(), "dfeng-"));
+    const fetchFn = (async () => Response.json({
+      tag_name: "v99.0.0", draft: false, prerelease: false, published_at: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+      assets: [{ name: asset.name, digest: `sha256:${"b".repeat(64)}`, browser_download_url: `https://evil.example/${asset.name}` }],
+    })) as unknown as typeof fetch;
+    expect((await new OpenCodeSidecar({ home, fetch: fetchFn }).checkForUpdate()).status).toBe("no_asset");
+  });
+
+  it("moves an old install to neutral names and keeps session data out of the install folder", () => {
+    const home = mkdtempSync(joinPath(tmpdir(), "dfeng-"));
+    const exe = process.platform === "win32" ? "opencode.exe" : "opencode";
+    mkdirFs(joinPath(home, "opencode", "bin", OPENCODE_VERSION), { recursive: true });
+    mkdirFs(joinPath(home, "opencode", "data", "opencode", "log"), { recursive: true });
+    writeFs(joinPath(home, "opencode", "bin", OPENCODE_VERSION, exe), "bin");
+    writeFs(joinPath(home, "opencode", "data", "opencode", "log", "opencode.log"), "modelID=secret");
+    const sidecar = new OpenCodeSidecar({ home });
+    expect(exists(joinPath(home, "opencode"))).toBe(false);
+    expect(exists(sidecar.managedBinary)).toBe(true);
+    expect(sidecar.managedBinary).toContain("dani-engine");
+    expect(exists(joinPath(home, "engine", "data"))).toBe(false);
+    expect(sidecar.runDir.startsWith(joinPath(home, "engine", "run"))).toBe(true);
+    void createHash;
   });
 });

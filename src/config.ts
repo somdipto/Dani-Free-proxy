@@ -64,7 +64,8 @@ const DEFAULTS: DaniFreeConfig = {
   bodyLimitBytes: 4 * 1024 * 1024,
   configPath: DEFAULT_CONFIG_PATH,
   catalogPath: join(homedir(), ".config", "dani-free", "catalog.json"),
-  refreshIntervalHours: 24,
+  // New free models land often: re-list every 6h (listing is cheap; only new models are probed).
+  refreshIntervalHours: 6,
   probeOnRefresh: true,
   privateMode: false,
   apiKeyFile: join(homedir(), ".config", "dani-free", "api-key"),

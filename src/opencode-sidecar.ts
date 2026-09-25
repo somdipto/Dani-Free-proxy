@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -17,6 +17,10 @@ import { join } from "node:path";
  *   adapter rejects each request. Nothing on this machine is read, run,
  *   written or fetched by the sidecar.
  * - Auth: a random server password per run, shared only with the adapter.
+ * - Opacity: installed users must not be able to tell which model answers.
+ *   The sidecar lives in <home>/engine as "dani-engine", and its database
+ *   and log (which record model ids) go to a per-run directory that is
+ *   wiped on stop and swept on the next start.
  */
 
 export const OPENCODE_VERSION = "1.18.32";
@@ -34,6 +38,33 @@ export const OPENCODE_ASSETS: Record<string, { name: string; sha256: string }> =
 };
 
 const RELEASE_BASE = `https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}`;
+const LATEST_RELEASE_API = "https://api.github.com/repos/anomalyco/opencode/releases/latest";
+/** A new engine release is adopted only after it has been public this long (bad releases get pulled fast). */
+export const ENGINE_MIN_RELEASE_AGE_MS = 48 * 60 * 60 * 1000;
+
+/** "1.18.32" > "1.18.9"; non-numeric parts compare as 0. */
+export function newerVersion(candidate: string, current: string): boolean {
+  const a = candidate.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const b = current.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    if ((a[index] ?? 0) !== (b[index] ?? 0)) return (a[index] ?? 0) > (b[index] ?? 0);
+  }
+  return false;
+}
+
+interface EngineState {
+  /** Engine version in use, when newer than the built-in pin. */
+  version?: string;
+  /** Previous working version, for rollback. */
+  previous?: string;
+  /** Versions that failed to install or start: never retried. */
+  rejected?: string[];
+  checkedAt?: string;
+}
+
+export type EngineUpdateResult =
+  | { status: "current" | "disabled" | "too_new" | "rejected" | "no_asset" | "check_failed"; version?: string; error?: string }
+  | { status: "updated"; version: string; previous: string };
 const START_TIMEOUT_MS = 45_000;
 const RESTART_DELAY_MS = 5_000;
 
@@ -97,6 +128,45 @@ function findFile(dir: string, name: string): string | undefined {
   return undefined;
 }
 
+/** Move an install from <home>/opencode to <home>/engine, renaming the binary. */
+function migrateLegacyRoot(legacy: string, root: string, exeName: string): void {
+  try {
+    if (!existsSync(legacy) || existsSync(root)) return;
+    renameSync(legacy, root);
+    const oldExe = join(root, "bin", OPENCODE_VERSION, process.platform === "win32" ? "opencode.exe" : "opencode");
+    if (existsSync(oldExe)) renameSync(oldExe, join(root, "bin", OPENCODE_VERSION, exeName));
+    for (const dir of ["data", "state"]) rmSync(join(root, dir), { recursive: true, force: true });
+  } catch {
+    /* fresh install path handles it */
+  }
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Remove per-run dirs left by proxies that are no longer running. */
+function sweepRunDirs(parent: string, keep: string): void {
+  if (!existsSync(parent)) return;
+  for (const name of readdirSync(parent)) {
+    const dir = join(parent, name);
+    if (dir === keep) continue;
+    const pid = Number(name.split("-")[0]);
+    if (Number.isInteger(pid) && pid > 0 && pid !== process.pid && pidAlive(pid)) continue;
+    if (pid === process.pid) continue;
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* try again next start */
+    }
+  }
+}
+
 export class OpenCodeSidecar {
   readonly root: string;
   readonly password = randomBytes(24).toString("base64url");
@@ -107,9 +177,13 @@ export class OpenCodeSidecar {
   private url?: string;
   private readonly log: (line: string) => void;
   private readonly fetchFn: typeof fetch;
+  /** Per-run data/state (session database, log). Removed on stop. */
+  readonly runDir: string;
 
   constructor(private readonly options: SidecarOptions) {
-    this.root = join(options.home, "opencode");
+    this.root = join(options.home, "engine");
+    migrateLegacyRoot(join(options.home, "opencode"), this.root, this.exeName);
+    this.runDir = join(this.root, "run", `${process.pid}-${randomBytes(4).toString("hex")}`);
     this.log = options.log ?? (() => undefined);
     this.fetchFn = options.fetch ?? fetch;
   }
@@ -119,11 +193,129 @@ export class OpenCodeSidecar {
   }
 
   private get exeName(): string {
-    return process.platform === "win32" ? "opencode.exe" : "opencode";
+    return process.platform === "win32" ? "dani-engine.exe" : "dani-engine";
   }
 
   get managedBinary(): string {
-    return join(this.root, "bin", OPENCODE_VERSION, this.exeName);
+    return this.binaryFor(this.activeVersion);
+  }
+
+  binaryFor(version: string): string {
+    return join(this.root, "bin", version, this.exeName);
+  }
+
+  /** The built-in pinned version, or a newer verified one adopted by checkForUpdate. */
+  get activeVersion(): string {
+    const state = this.readState();
+    return state.version && newerVersion(state.version, OPENCODE_VERSION) && existsSync(this.binaryFor(state.version)) ? state.version : OPENCODE_VERSION;
+  }
+
+  private readState(): EngineState {
+    try {
+      return JSON.parse(readFileSync(join(this.root, "engine.json"), "utf8")) as EngineState;
+    } catch {
+      return {};
+    }
+  }
+
+  private writeState(state: EngineState): void {
+    mkdirSync(this.root, { recursive: true, mode: 0o700 });
+    writeFileSync(join(this.root, "engine.json"), `${JSON.stringify(state)}\n`, { mode: 0o600 });
+  }
+
+  /**
+   * Daily engine update, no code push needed. Takes the latest stable
+   * release only when it is newer than what runs now, has been public for
+   * 48h, and its asset matches the SHA-256 digest GitHub publishes for it.
+   * The new build must start and list its free models; otherwise the
+   * previous version keeps running and the new one is never retried.
+   * DANI_FREE_ENGINE_AUTOUPDATE=0 turns this off.
+   */
+  async checkForUpdate(options: { now?: () => number; signal?: AbortSignal } = {}): Promise<EngineUpdateResult> {
+    if (process.env.DANI_FREE_ENGINE_AUTOUPDATE === "0" || this.options.binary) return { status: "disabled" };
+    const now = options.now?.() ?? Date.now();
+    const state = this.readState();
+    const current = this.activeVersion;
+    let release: { tag_name?: string; published_at?: string; draft?: boolean; prerelease?: boolean; assets?: Array<{ name?: string; digest?: string; browser_download_url?: string }> };
+    try {
+      const response = await this.fetchFn(LATEST_RELEASE_API, { headers: { accept: "application/vnd.github+json" }, signal: options.signal });
+      if (!response.ok) return { status: "check_failed", error: `HTTP ${response.status}` };
+      release = await response.json() as typeof release;
+    } catch (error) {
+      return { status: "check_failed", error: error instanceof Error ? error.message : String(error) };
+    }
+    this.writeState({ ...state, checkedAt: new Date(now).toISOString() });
+    const version = (release.tag_name ?? "").replace(/^v/, "");
+    if (!version || release.draft || release.prerelease || !newerVersion(version, current)) return { status: "current", version: current };
+    if (state.rejected?.includes(version)) return { status: "rejected", version };
+    const published = Date.parse(release.published_at ?? "");
+    if (!Number.isFinite(published) || now - published < ENGINE_MIN_RELEASE_AGE_MS) return { status: "too_new", version };
+    const key = platformKey();
+    const pinned = key ? OPENCODE_ASSETS[key] : undefined;
+    const asset = pinned ? release.assets?.find((item) => item.name === pinned.name) : undefined;
+    const digest = asset?.digest?.match(/^sha256:([0-9a-f]{64})$/)?.[1];
+    if (!asset?.browser_download_url || !digest || !asset.browser_download_url.startsWith(`https://github.com/anomalyco/opencode/releases/download/v${version}/`)) {
+      return { status: "no_asset", version };
+    }
+    const reject = (error: string): EngineUpdateResult => {
+      const latest = this.readState();
+      this.writeState({ ...latest, rejected: [...new Set([...(latest.rejected ?? []), version])].slice(-10) });
+      rmSync(join(this.root, "bin", version), { recursive: true, force: true });
+      return { status: "rejected", version, error };
+    };
+    try {
+      await this.install(version, asset.browser_download_url, pinned!.name, digest, options.signal);
+    } catch (error) {
+      return reject(error instanceof Error ? error.message : String(error));
+    }
+    const listed = await run(this.binaryFor(version), ["models", "opencode"], { cwd: this.prepareDirs(), env: this.env(), timeoutMs: 90_000 }).catch(() => undefined);
+    const models = listed?.code === 0 ? listed.stdout.split(/\r?\n/).filter((line) => line.trim().startsWith("opencode/")) : [];
+    if (models.length === 0) return reject("new engine listed no free models");
+    const running = Boolean(this.child);
+    this.writeState({ ...this.readState(), version, previous: current });
+    if (running) {
+      try {
+        await this.restart();
+      } catch (error) {
+        // Back to the version that worked.
+        this.writeState({ ...this.readState(), version: current === OPENCODE_VERSION ? undefined : current });
+        const result = reject(error instanceof Error ? error.message : String(error));
+        await this.restart().catch(() => undefined);
+        return result;
+      }
+    }
+    // Keep the built-in pin, the new version and the one before it.
+    for (const name of existsSync(join(this.root, "bin")) ? readdirSync(join(this.root, "bin")) : []) {
+      if (![OPENCODE_VERSION, version, current].includes(name) && !name.startsWith(".")) rmSync(join(this.root, "bin", name), { recursive: true, force: true });
+    }
+    return { status: "updated", version, previous: current };
+  }
+
+  /** Download, verify against the given SHA-256, unpack and place bin/<version>/dani-engine. */
+  private async install(version: string, url: string, assetName: string, sha256: string, signal?: AbortSignal): Promise<string> {
+    const response = await this.fetchFn(url, { signal, redirect: "follow" });
+    if (!response.ok) throw new Error(`engine download failed: HTTP ${response.status}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (createHash("sha256").update(bytes).digest("hex") !== sha256) throw new Error("engine download failed its checksum");
+    const staging = join(this.root, "bin", `.staging-${process.pid}`);
+    rmSync(staging, { recursive: true, force: true });
+    mkdirSync(staging, { recursive: true });
+    try {
+      const archive = join(staging, assetName);
+      writeFileSync(archive, bytes);
+      // bsdtar (macOS, Windows 10+) reads zip and tar.gz; GNU tar reads the Linux tar.gz.
+      const unpacked = await run("tar", ["-xf", archive, "-C", staging], { timeoutMs: 120_000 });
+      if (unpacked.code !== 0) throw new Error("could not unpack the engine");
+      const found = findFile(staging, process.platform === "win32" ? "opencode.exe" : "opencode");
+      if (!found) throw new Error("engine archive had no binary");
+      const target = this.binaryFor(version);
+      mkdirSync(join(this.root, "bin", version), { recursive: true });
+      renameSync(found, target);
+      if (process.platform !== "win32") chmodSync(target, 0o755);
+      return target;
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+    }
   }
 
   private env(): NodeJS.ProcessEnv {
@@ -132,9 +324,9 @@ export class OpenCodeSidecar {
     return {
       ...env,
       XDG_CONFIG_HOME: join(this.root, "config"),
-      XDG_DATA_HOME: join(this.root, "data"),
+      XDG_DATA_HOME: join(this.runDir, "data"),
       XDG_CACHE_HOME: join(this.root, "cache"),
-      XDG_STATE_HOME: join(this.root, "state"),
+      XDG_STATE_HOME: join(this.runDir, "state"),
       OPENCODE_CONFIG: join(this.root, "config", "opencode", "opencode.json"),
       OPENCODE_SERVER_PASSWORD: this.password,
       OPENCODE_DISABLE_AUTOUPDATE: "1",
@@ -143,7 +335,10 @@ export class OpenCodeSidecar {
   }
 
   private prepareDirs(): string {
-    for (const dir of ["config/opencode", "data", "cache", "state", "work"]) mkdirSync(join(this.root, dir), { recursive: true, mode: 0o700 });
+    for (const dir of ["config/opencode", "cache", "work"]) mkdirSync(join(this.root, dir), { recursive: true, mode: 0o700 });
+    for (const dir of ["data", "state"]) mkdirSync(join(this.runDir, dir), { recursive: true, mode: 0o700 });
+    // Earlier versions kept the session database and log here.
+    for (const dir of ["data", "state"]) rmSync(join(this.root, dir), { recursive: true, force: true });
     writeFileSync(join(this.root, "config", "opencode", "opencode.json"), `${JSON.stringify(SIDECAR_CONFIG, null, 2)}\n`, { mode: 0o600 });
     return join(this.root, "work");
   }
@@ -156,25 +351,7 @@ export class OpenCodeSidecar {
     const key = platformKey();
     const asset = key ? OPENCODE_ASSETS[key] : undefined;
     if (!asset) throw new Error(`no OpenCode build for ${process.platform}/${process.arch}`);
-    const response = await this.fetchFn(`${RELEASE_BASE}/${asset.name}`, { signal, redirect: "follow" });
-    if (!response.ok) throw new Error(`OpenCode download failed: HTTP ${response.status}`);
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    const digest = createHash("sha256").update(bytes).digest("hex");
-    if (digest !== asset.sha256) throw new Error("OpenCode download failed its checksum");
-    const staging = join(this.root, "bin", `.staging-${process.pid}`);
-    rmSync(staging, { recursive: true, force: true });
-    mkdirSync(staging, { recursive: true });
-    const archive = join(staging, asset.name);
-    writeFileSync(archive, bytes);
-    // bsdtar (macOS, Windows 10+) reads zip and tar.gz; GNU tar reads the Linux tar.gz.
-    const unpacked = await run("tar", ["-xf", archive, "-C", staging], { timeoutMs: 120_000 });
-    if (unpacked.code !== 0) throw new Error("could not unpack OpenCode");
-    const found = findFile(staging, this.exeName);
-    if (!found) throw new Error("OpenCode archive had no binary");
-    mkdirSync(join(this.root, "bin", OPENCODE_VERSION), { recursive: true });
-    renameSync(found, this.managedBinary);
-    if (process.platform !== "win32") chmodSync(this.managedBinary, 0o755);
-    rmSync(staging, { recursive: true, force: true });
+    await this.install(OPENCODE_VERSION, `${RELEASE_BASE}/${asset.name}`, asset.name, asset.sha256, signal);
     return this.managedBinary;
   }
 
@@ -184,9 +361,10 @@ export class OpenCodeSidecar {
     const binary = await this.ensureBinary(signal);
     // Shutdown may have happened while the download ran.
     if (this.disposed) throw new Error("sidecar is shut down");
+    sweepRunDirs(join(this.root, "run"), this.runDir);
     const cwd = this.prepareDirs();
     this.stopping = false;
-    const child = spawn(binary, ["serve", "--port", "0", "--hostname", "127.0.0.1", "--pure"], {
+    const child = spawn(binary, ["serve", "--port", "0", "--hostname", "127.0.0.1", "--pure", "--log-level", "ERROR"], {
       cwd,
       env: this.env(),
       stdio: ["ignore", "pipe", "pipe"],
@@ -262,6 +440,11 @@ export class OpenCodeSidecar {
   stop(): void {
     this.disposed = true;
     this.halt();
+    try {
+      rmSync(this.runDir, { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      /* a locked file on Windows: swept on the next start */
+    }
   }
 
   private halt(): void {

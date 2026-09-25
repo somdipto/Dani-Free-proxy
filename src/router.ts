@@ -7,6 +7,7 @@ import type {
   ChatRequest,
 } from "./types";
 import { redactDiagnostics } from "./redact";
+import { VENDOR_WORDS, identityTokens, opaqueToolCallId, withIdentity } from "./opacity";
 import { retryAfterMs } from "./retry-after";
 import {
   API_VERSION,
@@ -271,7 +272,7 @@ function supportsCapabilities(model: BackendModel, required: Capability[]): bool
   return required.every((capability) => model.capabilities.includes(capability));
 }
 
-function outputLimitError(request: ChatRequest, model: BackendModel): Response | undefined {
+function outputLimitError(request: ChatRequest, model: BackendModel, brandName?: string): Response | undefined {
   if (
     typeof request.max_tokens === "number" &&
     Number.isFinite(request.max_tokens) &&
@@ -280,7 +281,9 @@ function outputLimitError(request: ChatRequest, model: BackendModel): Response |
     request.max_tokens > model.maxTokens
   ) {
     return structuredError(
-      `Requested max_tokens ${request.max_tokens} exceeds ${model.id} limit ${model.maxTokens}`,
+      brandName
+        ? `Requested max_tokens ${request.max_tokens} is more than ${brandName} can write in one reply`
+        : `Requested max_tokens ${request.max_tokens} exceeds ${model.id} limit ${model.maxTokens}`,
       422,
       "output_limit_exceeded",
     );
@@ -372,11 +375,17 @@ const UPSTREAM_WORDS = /\b(?:opencode(?: zen)?|kilo(?: ?code| gateway)?|openrout
 /** Remove backend names and model ids from a message a client will see. */
 export function scrubUpstreamText(text: string, names: readonly string[] = []): string {
   let out = text;
-  for (const name of [...names].sort((a, b) => b.length - a.length)) {
+  for (const name of identityTokens(names).sort((a, b) => b.length - a.length)) {
     if (name.length >= 3) out = out.split(name).join("model");
   }
-  return out.replace(UPSTREAM_WORDS, "upstream").replace(/\s{2,}/g, " ").trim();
+  out = out.replace(UPSTREAM_WORDS, "upstream").replace(VENDOR_PATTERN, "model");
+  // Version-looking tokens (v2.6, 3.5-flash, 480b) can identify a model too.
+  out = out.replace(/\b[a-z]*-?\d+(?:\.\d+)*[a-z]?(?:-[a-z0-9]+)*\b/gi, (token) => (/^\d{3}$/.test(token) || /^\d+(\.\d+)?s$/.test(token) ? token : /\d\.\d|\d+b\b|-/i.test(token) ? "model" : token));
+  out = out.replace(/\b(upstream|model)[-:](?:free|model)\b/gi, "model").replace(/:free\b/gi, "");
+  return out.replace(/\bmodel(?:[\s/:-]+model)+\b/gi, "model").replace(/\s{2,}/g, " ").trim();
 }
+
+const VENDOR_PATTERN = new RegExp(`(?<![a-z0-9])(?:${VENDOR_WORDS.map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![a-z0-9])`, "gi");
 
 const brandIds = new Map<string, string>();
 /** Stable opaque id per upstream id, so every frame of one stream shares an id. */
@@ -390,34 +399,69 @@ function brandIdFor(upstreamId: string): string {
   return id;
 }
 
+const MESSAGE_KEYS = ["role", "content", "reasoning", "reasoning_content", "tool_calls", "refusal", "function_call"];
+
+function opaqueToolCalls(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.map((call) => {
+    if (!isRecord(call)) return call;
+    const next: Record<string, unknown> = {};
+    for (const key of ["index", "type"]) if (key in call) next[key] = call[key];
+    if (typeof call.id === "string" && call.id) next.id = opaqueToolCallId(call.id);
+    if (isRecord(call.function)) {
+      const fn: Record<string, unknown> = {};
+      for (const key of ["name", "arguments"]) if (key in call.function) fn[key] = call.function[key];
+      next.function = fn;
+    }
+    return next;
+  });
+}
+
+function opaqueMessage(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  const next: Record<string, unknown> = {};
+  for (const key of MESSAGE_KEYS) if (key in value) next[key] = value[key];
+  if ("tool_calls" in next) next.tool_calls = opaqueToolCalls(next.tool_calls);
+  return next;
+}
+
+/**
+ * Allowlist rewrite of one completion/chunk: only OpenAI-standard fields
+ * survive, so provider extras (provider, system_fingerprint, reasoning_details
+ * formats, logprobs/tokenizer detail, cost, native finish reasons) cannot
+ * name or fingerprint the model. `model` becomes the brand id.
+ */
 function brandPayload(value: unknown, brandId: string, names: readonly string[] = []): unknown {
   if (!isRecord(value)) return value;
-  const copy: Record<string, unknown> = { ...value };
-  if (isRecord(copy.error)) {
-    const error: Record<string, unknown> = { ...copy.error };
-    if (typeof error.message === "string") error.message = scrubUpstreamText(error.message, names);
-    delete error.metadata;
-    delete error.provider;
+  const copy: Record<string, unknown> = {};
+  if (isRecord(value.error)) {
+    const error: Record<string, unknown> = {};
+    error.message = typeof value.error.message === "string" ? scrubUpstreamText(value.error.message, names) : "Request failed";
+    if (typeof value.error.type === "string") error.type = value.error.type;
+    if (typeof value.error.code === "string" && /^[a-z_]{1,40}$/.test(value.error.code)) error.code = value.error.code;
     copy.error = error;
   }
-  delete copy.attempts;
-  if ("model" in copy) copy.model = brandId;
-  delete copy.provider;
-  delete copy.system_fingerprint;
-  delete copy.service_tier;
-  if (typeof copy.id === "string") copy.id = `chatcmpl-${brandIdFor(copy.id)}`;
-  if (isRecord(copy.usage)) {
-    const usage: Record<string, unknown> = { ...copy.usage };
-    for (const key of ["cost", "is_byok", "cost_details"]) delete usage[key];
-    copy.usage = usage;
-  }
-  if (Array.isArray(copy.choices)) {
-    copy.choices = copy.choices.map((choice) => {
+  if (typeof value.id === "string") copy.id = `chatcmpl-${brandIdFor(value.id)}`;
+  if (typeof value.object === "string") copy.object = value.object;
+  if (typeof value.created === "number") copy.created = value.created;
+  if ("model" in value || Array.isArray(value.choices)) copy.model = brandId;
+  if (Array.isArray(value.choices)) {
+    copy.choices = value.choices.map((choice) => {
       if (!isRecord(choice)) return choice;
-      const next: Record<string, unknown> = { ...choice };
-      delete next.native_finish_reason;
+      const next: Record<string, unknown> = {};
+      if ("index" in choice) next.index = choice.index;
+      if ("message" in choice) next.message = opaqueMessage(choice.message);
+      if ("delta" in choice) next.delta = opaqueMessage(choice.delta);
+      if ("finish_reason" in choice) next.finish_reason = choice.finish_reason;
       return next;
     });
+  }
+  if (isRecord(value.usage)) {
+    const usage: Record<string, unknown> = {};
+    for (const key of ["prompt_tokens", "completion_tokens", "total_tokens"]) if (typeof value.usage[key] === "number") usage[key] = value.usage[key];
+    copy.usage = usage;
+  } else if (value.usage === null) {
+    copy.usage = null;
   }
   return copy;
 }
@@ -1363,7 +1407,9 @@ export class Router {
       // Reasoning models may spend a tiny budget thinking; a well-formed choice counts as alive.
       const choices = isRecord(payload) && Array.isArray(payload.choices) ? payload.choices : undefined;
       if (!choices || choices.length === 0) return { ok: false, latencyMs, error: "no choices" };
-      return { ok: true, latencyMs };
+      // A model that says it does tools must return one well-formed call before tool turns go to it.
+      const toolsOk = model.capabilities.includes("tools") ? await this.probeTools(adapter, model, scope.signal) : undefined;
+      return { ok: true, latencyMs, ...(toolsOk === undefined ? {} : { toolsOk }) };
     } catch (error) {
       const status = statusFrom(error);
       if (isAbort(error) && signal.aborted) throw error;
@@ -1376,6 +1422,52 @@ export class Router {
       };
     } finally {
       scope.dispose();
+    }
+  }
+
+  /** Tool-call smoke check: one forced call to a trivial function with valid JSON arguments. */
+  private async probeTools(adapter: BackendAdapter, model: BackendModel, signal: AbortSignal): Promise<boolean | undefined> {
+    const request: ChatRequest = {
+      model: model.id,
+      messages: [{ role: "user", content: "What is the weather in Paris? Use the tool." }],
+      tools: [{
+        type: "function",
+        function: {
+          name: "get_weather",
+          description: "Current weather for a city",
+          parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+        },
+      }],
+      tool_choice: "auto",
+      max_tokens: 256,
+      temperature: 0,
+      stream: false,
+    } as ChatRequest;
+    try {
+      const response = await raceWithSignal(adapter.complete(request, model, signal), signal);
+      if (response.status === 429) {
+        void response.body?.cancel().catch(() => undefined);
+        return undefined; // capacity, not a verdict: check again next refresh
+      }
+      if (response.status !== 200) {
+        void response.body?.cancel().catch(() => undefined);
+        return false;
+      }
+      const payload = JSON.parse(await raceWithSignal(response.text(), signal)) as unknown;
+      const choice = isRecord(payload) && Array.isArray(payload.choices) ? payload.choices[0] : undefined;
+      const calls = isRecord(choice) && isRecord(choice.message) && Array.isArray(choice.message.tool_calls) ? choice.message.tool_calls : [];
+      return calls.some((call) => {
+        if (!isRecord(call) || !isRecord(call.function) || call.function.name !== "get_weather") return false;
+        try {
+          const args = JSON.parse(String(call.function.arguments ?? "")) as unknown;
+          return isRecord(args) && typeof args.city === "string" && args.city.length > 0;
+        } catch {
+          return false;
+        }
+      });
+    } catch (error) {
+      if (isAbort(error) && signal.aborted) return undefined;
+      return statusFrom(error) === 429 ? undefined : false;
     }
   }
 
@@ -1614,8 +1706,10 @@ export class Router {
       // before it) is skipped while anything else is left to try.
       const held = catalog?.exhaustedBackends() ?? [];
       if (held.includes(route.model.backend) && attempts.slice(index + 1).some((next) => !held.includes(next.model.backend))) continue;
-      if (!supportsCapabilities(route.model, required)) {
-        if (this.brand && attempts.slice(index + 1).some((next) => supportsCapabilities(next.model, required))) continue;
+      const usable = (candidate: Route) => supportsCapabilities(candidate.model, required)
+        && !(required.includes("tools") && this.catalog?.toolsBroken(modelSelectorId(candidate.model)));
+      if (!usable(route)) {
+        if ((this.brand || supportsCapabilities(route.model, required)) && attempts.slice(index + 1).some(usable)) continue;
         return structuredError(
           this.brand
             ? `${this.brand.name} cannot handle this request right now (needs: ${required.join(", ")})`
@@ -1624,7 +1718,7 @@ export class Router {
           "unsupported_capability",
         );
       }
-      const limitError = outputLimitError(request, route.model);
+      const limitError = outputLimitError(request, route.model, this.brand?.name);
       if (limitError) return limitError;
 
       let response: Response;
@@ -2016,7 +2110,7 @@ export class Router {
           if (parsed.reasoning === undefined && parsed.reasoning_effort === undefined) parsed.reasoning = { effort: "none" };
         }
         const requestId = crypto.randomUUID().replace(/-/g, "");
-        const response = await this.complete(parsed, scope.signal, task);
+        const response = await this.complete(this.brand ? withIdentity(parsed) : parsed, scope.signal, task);
         if (scope.signal.aborted) {
           void response.body?.cancel().catch(() => undefined);
           throw abortError(scope.signal);

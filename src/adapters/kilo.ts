@@ -6,12 +6,13 @@ import type {
   ChatRequest,
 } from "../types";
 import { redactDiagnostics } from "../redact";
+import { debugLogging } from "../opacity";
 import { readCappedJson } from "./capped-json";
 import { retryAfterMs } from "../retry-after";
 
 /** Per-request diagnostics name the backend, so they stay off unless debugging. */
 function kiloLog(line: string): void {
-  if (process.env.DANI_FREE_DEBUG === "1" || process.env.DANI_FREE_EXPOSE_MODELS === "1") console.error(line);
+  if (debugLogging()) console.error(line);
 }
 
 export const KILO_DEFAULT_BASE_URL = "https://api.kilo.ai/api/gateway";

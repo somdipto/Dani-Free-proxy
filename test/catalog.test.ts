@@ -65,13 +65,16 @@ describe("ModelCatalog", () => {
     summary = await catalog.refresh([kilo]);
     expect(summary.added).toEqual(["kilo/c:free"]);
     expect(summary.removed).toEqual(["kilo/a:free"]);
-    expect(catalog.ranked()).toEqual(["kilo/b:free", "kilo/c:free"]);
+    // A model that arrives after install waits for its first answer (smoke check) before routing.
+    expect(catalog.ranked()).toEqual(["kilo/b:free"]);
+    catalog.recordSuccess("kilo/c:free", 100);
+    expect([...catalog.ranked()].sort()).toEqual(["kilo/b:free", "kilo/c:free"]);
 
     const before = catalog.refreshedAt;
     kilo.listFails = true;
     summary = await catalog.refresh([kilo]);
     expect(summary.backendErrors[0].backend).toBe("kilo");
-    expect(catalog.ranked()).toEqual(["kilo/b:free", "kilo/c:free"]);
+    expect([...catalog.ranked()].sort()).toEqual(["kilo/b:free", "kilo/c:free"]);
     expect(catalog.refreshedAt).toBe(before);
     expect(catalog.lastRefreshError).toContain("gateway down");
   });
@@ -175,7 +178,8 @@ describe("Router with catalog", () => {
 
   it("lists auto first as the default, with new flags, and picks up new models after refresh", async () => {
     const kilo = fakeKilo(["a:free"]);
-    const router = createRouter({ adapters: [kilo], catalog: new ModelCatalog(), probeOnRefresh: false });
+    const catalog = new ModelCatalog();
+    const router = createRouter({ adapters: [kilo], catalog, probeOnRefresh: false });
     await router.refreshCatalog();
     let listed = await (await router.handle(new Request("http://127.0.0.1/v1/models"))).json();
     expect(listed.data.map((item: { id: string }) => item.id)).toEqual(["auto", "kilo/a:free"]);
@@ -187,8 +191,12 @@ describe("Router with catalog", () => {
     expect(refresh.status).toBe(200);
     expect((await refresh.json()).added).toEqual(["kilo/brand-new:free"]);
     listed = await (await router.handle(new Request("http://127.0.0.1/v1/models"))).json();
-    expect(listed.data.map((item: { id: string }) => item.id)).toEqual(["auto", "kilo/a:free", "kilo/brand-new:free"]);
-    expect(listed.data[2].new).toBe(true);
+    // Not routable until it has passed a smoke check (probing is off in this router).
+    expect(listed.data.map((item: { id: string }) => item.id)).toEqual(["auto", "kilo/a:free"]);
+    catalog.recordSuccess("kilo/brand-new:free", 200);
+    listed = await (await router.handle(new Request("http://127.0.0.1/v1/models"))).json();
+    expect(listed.data.map((item: { id: string }) => item.id).sort()).toEqual(["auto", "kilo/a:free", "kilo/brand-new:free"]);
+    expect(listed.data.find((item: { id: string }) => item.id === "kilo/brand-new:free").new).toBe(true);
   });
 
   it("does not hide a model the router sees rate-limited", async () => {

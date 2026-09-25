@@ -6,7 +6,9 @@ import { startRefreshScheduler } from "./refresh-scheduler";
 import { catalogAdapters, opencodeEnabled, startServer } from "./server";
 import { OpenCodeSidecar } from "./opencode-sidecar";
 import { FeedbackStore } from "./tasks";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { existsSync, renameSync, rmSync } from "node:fs";
+import { devExposureAllowed, sealKey } from "./opacity";
 import { fallbackPorts, listenWithFallback, loadOrCreateInstallKey, readInstallKey, readLiveRuntime, removeRuntime, writeRuntime } from "./install";
 
 const HELP = `Usage: dani-free <command> [options]
@@ -97,6 +99,18 @@ async function fetchJson(config: DaniFreeConfig, path: string): Promise<unknown>
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Move a plain state file to a neutral name once; the next save seals it. */
+function neutralStatePath(plainPath: string, name: string): string {
+  const target = join(dirname(plainPath), name);
+  try {
+    if (existsSync(plainPath) && !existsSync(target)) renameSync(plainPath, target);
+    else if (existsSync(plainPath)) rmSync(plainPath, { force: true });
+  } catch {
+    /* keep going with a fresh file */
+  }
+  return target;
 }
 
 function configSecrets(config: DaniFreeConfig): string[] {
@@ -198,14 +212,19 @@ async function runStart(config: DaniFreeConfig): Promise<number> {
   // An OpenCode sidecar URL set by the caller means "use that sidecar"; otherwise we run our own.
   const externalOpencode = Boolean(process.env.DANI_FREE_OPENCODE_BASE_URL);
   applyBackendEnvironment(config);
-  const catalog = new ModelCatalog({ path: config.catalogPath });
   // Per-install key unless one is configured or auth is explicitly off.
   const usingInstallKey = !config.apiKey && config.requireKey;
   const apiKey = config.apiKey ?? (config.requireKey ? loadOrCreateInstallKey(config.apiKeyFile) : undefined);
   if (!apiKey) console.error("dani-free: client auth is OFF (DANI_FREE_NO_AUTH=1): any local process can use this proxy");
-  // Product mode: clients only ever see "Dani Free Auto". DANI_FREE_EXPOSE_MODELS=1 shows the real roster (development).
-  const exposeModels = process.env.DANI_FREE_EXPOSE_MODELS === "1";
+  // Product mode: clients only ever see "Dani Free Auto". DANI_FREE_EXPOSE_MODELS=1 shows the real
+  // roster, in development builds only; a release build ignores it.
+  const exposeModels = devExposureAllowed();
   const brand = exposeModels ? undefined : { id: "dani-free-auto", name: "Dani Free Auto" };
+  // Branded: state files are sealed (not readable as plain JSON) under neutral names.
+  const stateKey = brand ? sealKey(apiKey) : undefined;
+  const catalogPath = brand ? neutralStatePath(config.catalogPath, "state.dat") : config.catalogPath;
+  const feedbackPath = brand ? neutralStatePath(join(dirname(config.catalogPath), "feedback.json"), "signals.dat") : join(dirname(config.catalogPath), "feedback.json");
+  const catalog = new ModelCatalog({ path: catalogPath, sealKey: stateKey });
   const useSidecar = opencodeEnabled() && !externalOpencode;
   const sidecar = useSidecar
     ? new OpenCodeSidecar({
@@ -220,7 +239,7 @@ async function runStart(config: DaniFreeConfig): Promise<number> {
     catalog,
     adapters: catalogAdapters(sidecar ? { opencode: sidecar } : {}),
     brand,
-    feedback: new FeedbackStore({ path: `${dirname(config.catalogPath)}/feedback.json` }),
+    feedback: new FeedbackStore({ path: feedbackPath, sealKey: stateKey }),
     onQuotaChange: (backend, exhausted) => {
       const label = exposeModels ? backend : backend === "opencode" ? "primary" : "fallback";
       console.log(exhausted ? `[catalog] ${label} free pool used up, switching to the next pool` : `[catalog] ${label} free pool is back`);
@@ -252,7 +271,15 @@ async function runStart(config: DaniFreeConfig): Promise<number> {
   console.log(`DANI_FREE_READY ${JSON.stringify({ baseUrl, port: started.port, pid: process.pid, apiKeyFile: usingInstallKey ? config.apiKeyFile : null, privateMode: config.privateMode })}`);
   // Boot-time refresh plus a daily one. Chat is served from the saved catalog
   // (or live discovery on a first run) while the refresh runs.
+  let lastEngineCheck = 0;
   const refreshAll = async () => {
+    // Once a day: adopt a newer verified engine release (no app update or code push needed).
+    if (sidecar?.baseUrl && Date.now() - lastEngineCheck > 20 * 60 * 60 * 1000) {
+      lastEngineCheck = Date.now();
+      const update = await sidecar.checkForUpdate().catch(() => undefined);
+      if (update && exposeModels) console.error(`[free-backend] engine update: ${JSON.stringify(update)}`);
+      else if (update?.status === "updated") console.log("[catalog] primary free pool engine updated");
+    }
     // New OpenCode models appear on their own: refresh OpenCode's list first, then re-list every backend.
     if (sidecar?.baseUrl) await sidecar.refreshModels().catch(() => false);
     return started.router.refreshCatalog();
