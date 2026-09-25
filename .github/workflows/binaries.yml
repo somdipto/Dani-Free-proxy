@@ -78,7 +78,7 @@ jobs:
           test -s "$keyfile"
           key=$(tr -d '\r\n' < "$keyfile")
           test "$(curl -s -o /dev/null -w '%{http_code}' "$base/models")" = "401"
-          curl -fsS -H "authorization: Bearer $key" "$base/models" | grep -q '"id":"auto"'
+          curl -fsS -H "authorization: Bearer $key" "$base/models" | grep -q '"id":"dani-free-auto"'
           "dist/${{ matrix.bin }}" status
           "dist/${{ matrix.bin }}" refresh
           cat err.log
