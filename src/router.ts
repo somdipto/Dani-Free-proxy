@@ -8,6 +8,19 @@ import type {
 } from "./types";
 import { redactDiagnostics } from "./redact";
 import { retryAfterMs } from "./retry-after";
+import {
+  API_VERSION,
+  CLIENT_ID_HEADER,
+  FeedbackStore,
+  OUTCOMES,
+  orderForTask,
+  parseTask,
+  REQUEST_ID_HEADER,
+  TASK_HEADER,
+  TASKS,
+  type Outcome,
+  type Task,
+} from "./tasks";
 
 export interface RouterOptions {
   adapters?: BackendAdapter[];
@@ -59,7 +72,18 @@ export interface RouterOptions {
   brand?: { id: string; name: string };
   /** Called when a backend's free quota runs out or comes back. */
   onQuotaChange?: (backend: string, exhausted: boolean) => void;
+  /** Outcome feedback store (POST /v1/feedback). Omit for an in-memory store. */
+  feedback?: FeedbackStore;
+  /** Accept feedback. Default: on unless Private mode or DANI_FREE_FEEDBACK=0. */
+  feedbackEnabled?: boolean;
+  /** Voice quick-ack budget: time to first byte across all attempts. Default 1500ms. */
+  ackTimeoutMs?: number;
 }
+
+/** Output cap for the ack lane: a short spoken acknowledgment. */
+export const ACK_MAX_TOKENS = 60;
+const WARM_INTERVAL_MS = 30_000;
+const ACK_HEDGE = 2;
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
 export const DEFAULT_ATTEMPT_TIMEOUT_MS = 60_000;
@@ -1056,6 +1080,12 @@ export class Router {
   readonly quotaBackends: ReadonlySet<string>;
   readonly brand?: { id: string; name: string };
   private readonly onQuotaChange?: (backend: string, exhausted: boolean) => void;
+  readonly feedback: FeedbackStore;
+  readonly feedbackEnabled: boolean;
+  readonly ackTimeoutMs: number;
+  private lastWarmAt = 0;
+  /** Which selector produced a response, for request-id tracking. */
+  private readonly answeredBy = new WeakMap<Response, string>();
   private readonly modelCache = new Map<string, {
     expiresAt: number;
     models?: BackendModel[];
@@ -1080,6 +1110,137 @@ export class Router {
     this.probeTimeoutMs = options.probeTimeoutMs ?? 12_000;
     this.probeOnRefresh = options.probeOnRefresh ?? true;
     this.privateMode = options.privateMode ?? false;
+    this.feedback = options.feedback ?? new FeedbackStore();
+    this.feedbackEnabled = options.feedbackEnabled ?? (!this.privateMode && process.env.DANI_FREE_FEEDBACK !== "0");
+    this.ackTimeoutMs = options.ackTimeoutMs ?? 1_500;
+  }
+
+  private withLatency(routes: Route[]): Array<Route & { latencyMs?: number }> {
+    return routes.map((route) => ({ ...route, latencyMs: this.catalog?.get(modelSelectorId(route.model))?.latencyMs }));
+  }
+
+  /** Task order, then the bounded feedback adjustment. */
+  private routesForTask(task: Task | undefined, chain: Route[]): Route[] {
+    const ordered = task ? orderForTask(task, this.withLatency(chain)) : chain;
+    return this.feedback.adjust(task ?? "auto", ordered, (route) => modelSelectorId(route.model));
+  }
+
+  /**
+   * Voice quick-ack lane. Streams from the fastest non-sidecar models, two at
+   * a time; the first to send a byte wins and the other is cancelled. The
+   * whole lane has ackTimeoutMs to produce a first byte, else 504
+   * ack_timeout (the app plays a local acknowledgment).
+   */
+  private async completeAck(request: ChatRequest, routes: Route[], signal: AbortSignal): Promise<Response> {
+    const budget = deadline(signal, this.ackTimeoutMs);
+    const catalog = this.catalog;
+    const brand = this.brandContext();
+    try {
+      for (let start = 0; start < routes.length; start += ACK_HEDGE) {
+        if (budget.signal.aborted) break;
+        const group = routes.slice(start, start + ACK_HEDGE);
+        const controllers = group.map(() => new AbortController());
+        const onBudget = () => controllers.forEach((controller) => controller.abort());
+        budget.signal.addEventListener("abort", onBudget, { once: true });
+        const startedAt = Date.now();
+        const attempts = group.map(async (route, index) => {
+          const scope = combineSignals(controllers[index].signal, signal);
+          const selector = modelSelectorId(route.model);
+          let pendingReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+          try {
+            const response = await raceWithSignal(route.backend.complete({ ...request, model: route.model.id }, route.model, scope.signal), scope.signal);
+            if (response.status !== 200 || !response.body) {
+              void response.body?.cancel().catch(() => undefined);
+              if (!controllers[index].signal.aborted) {
+                catalog?.recordFailure(selector, `HTTP ${response.status}`, { rateLimited: response.status === 429, retryAfterMs: retryAfterMs(response.headers) });
+              }
+              throw new Error("no answer");
+            }
+            const reader = response.body.getReader();
+            pendingReader = reader;
+            // The winner is the first to send spoken content, not just bytes:
+            // reasoning models stream thinking deltas (empty content) first.
+            const decoder = new TextDecoder();
+            const chunks: Uint8Array[] = [];
+            let seen = "";
+            for (;;) {
+              const next = await raceWithSignal(reader.read(), scope.signal);
+              if (next.done) {
+                if (chunks.length && /"content"\s*:\s*"(?:[^"\\]|\\.)+"/.test(seen)) break;
+                throw new Error("empty");
+              }
+              if (!next.value?.length) continue;
+              chunks.push(next.value);
+              seen = (seen + decoder.decode(next.value, { stream: true })).slice(-4_096);
+              if (/"content"\s*:\s*"(?:[^"\\]|\\.)+"/.test(seen)) break;
+            }
+            const size = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+            const first = new Uint8Array(size);
+            let offset = 0;
+            for (const chunk of chunks) { first.set(chunk, offset); offset += chunk.length; }
+            return { index, selector, response, reader, first };
+          } catch (error) {
+            // A cancelled loser (or failed attempt) must release its upstream stream.
+            void pendingReader?.cancel().catch(() => undefined);
+            if (!controllers[index].signal.aborted && !signal.aborted && !(error instanceof Error && error.message === "no answer")) {
+              catalog?.recordFailure(selector, sanitizeReason(error, "network error"));
+            }
+            throw error;
+          } finally {
+            scope.dispose?.();
+          }
+        });
+        let winner: Awaited<typeof attempts[number]> | undefined;
+        try {
+          winner = await Promise.any(attempts);
+        } catch {
+          winner = undefined;
+        } finally {
+          budget.signal.removeEventListener("abort", onBudget);
+        }
+        if (!winner) continue;
+        const won = winner;
+        controllers.forEach((controller, index) => { if (index !== won.index) controller.abort(); });
+        // Losers that already answered: release their bodies.
+        attempts.forEach((attempt, index) => {
+          if (index === won.index) return;
+          void attempt.then((other) => other.reader.cancel().catch(() => undefined), () => undefined);
+        });
+        catalog?.recordSuccess(won.selector, Date.now() - startedAt);
+        this.noteAnswered(won.selector);
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(won.first);
+          },
+          async pull(controller) {
+            const next = await won.reader.read();
+            if (next.done) controller.close();
+            else controller.enqueue(next.value);
+          },
+          cancel(reason) {
+            void won.reader.cancel(reason).catch(() => undefined);
+          },
+        });
+        const response = withModelHeader(new Response(body, { status: 200, headers: won.response.headers }), won.selector, brand);
+        this.answeredBy.set(response, won.selector);
+        return response;
+      }
+      if (signal.aborted) throw abortError(signal);
+      return structuredError("No quick answer in time", 504, "ack_timeout", "api_error");
+    } finally {
+      budget.dispose();
+    }
+  }
+
+  private warm(): void {
+    const now = Date.now();
+    if (now - this.lastWarmAt < WARM_INTERVAL_MS) return;
+    this.lastWarmAt = now;
+    for (const adapter of this.adapters) {
+      if (adapter.id === "opencode") continue;
+      const scope = abortAfter(10_000);
+      void Promise.resolve().then(() => adapter.listModels(scope.signal)).catch(() => undefined).finally(() => scope.cancel());
+    }
   }
 
   /** True when this failure means the backend's shared free quota is used up. */
@@ -1435,7 +1596,9 @@ export class Router {
     const answered = (response: Response, selector: string): Response => {
       catalog?.recordSuccess(selector, Date.now() - attemptStartedAt);
       this.noteAnswered(selector);
-      return withModelHeader(response, selector, this.brandContext());
+      const result = withModelHeader(response, selector, this.brandContext());
+      this.answeredBy.set(result, selector);
+      return result;
     };
     const required = requiredCapabilities(request);
 
@@ -1650,10 +1813,10 @@ export class Router {
     return allModelsFailedResponse(failures);
   }
 
-  private async complete(request: ChatRequest, signal: AbortSignal): Promise<Response> {
+  private async complete(request: ChatRequest, signal: AbortSignal, task?: Task): Promise<Response> {
     const parsed = modelSelector(request.model);
     if (!parsed.auto && (!parsed.backendId || !parsed.id)) {
-      if (this.brand) return this.complete({ ...request, model: "auto" }, signal);
+      if (this.brand) return this.complete({ ...request, model: "auto" }, signal, task);
       return structuredError("Model must use auto or backend/model syntax", 400, "invalid_model");
     }
     if (parsed.auto) {
@@ -1674,13 +1837,15 @@ export class Router {
         if (route instanceof Response) return route;
         return this.completeWithFailover(request, [route], signal);
       }
-      return this.completeWithFailover(request, chain, signal);
+      const routes = this.routesForTask(task, chain);
+      if (task === "ack") return this.completeAck(request, routes, signal);
+      return this.completeWithFailover(request, routes, signal);
     }
     const selector = request.model.trim();
     const route = await this.resolveExplicit(selector, signal);
     if (route instanceof Response) {
       // Product mode has one public model: anything else a client sends is auto.
-      if (this.brand) return this.complete({ ...request, model: "auto" }, signal);
+      if (this.brand) return this.complete({ ...request, model: "auto" }, signal, task);
       return route;
     }
     const first = modelSelectorId(route.model);
@@ -1699,6 +1864,33 @@ export class Router {
       return structuredError("Invalid API key", 401, "invalid_api_key", "authentication_error");
     }
     const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/v1/warm") {
+      this.warm();
+      return new Response(null, { status: 204 });
+    }
+    if (request.method === "POST" && url.pathname === "/v1/feedback") {
+      if (clientAddress !== undefined && !isLoopbackAddress(clientAddress)) {
+        return structuredError("Feedback is only accepted from this machine", 403, "forbidden", "permission_error");
+      }
+      if (!this.feedbackEnabled) return new Response(null, { status: 204 });
+      const body = await readBody(request, 4_096, request.signal);
+      if (body instanceof Response) return body;
+      let payload: unknown;
+      try {
+        payload = JSON.parse(body);
+      } catch {
+        return structuredError("Feedback must be JSON", 400, "invalid_feedback");
+      }
+      const item = isRecord(payload) ? payload : {};
+      const requestId = typeof item.request_id === "string" ? item.request_id : "";
+      const outcome = typeof item.outcome === "string" ? item.outcome : "";
+      if (item.v !== 1 || !/^[A-Za-z0-9_-]{8,128}$/.test(requestId) || !(OUTCOMES as readonly string[]).includes(outcome)
+        || (item.task !== undefined && !(TASKS as readonly string[]).includes(String(item.task)))) {
+        return structuredError("Invalid feedback", 400, "invalid_feedback");
+      }
+      this.feedback.record(requestId, outcome as Outcome);
+      return json({ ok: true });
+    }
     if (request.method === "GET" && url.pathname === "/health") {
       const timeout = deadline(request.signal, this.timeoutMs);
       try {
@@ -1710,6 +1902,9 @@ export class Router {
             ok,
             status: ok ? "ok" : "degraded",
             checkedAt: new Date().toISOString(),
+            api: API_VERSION,
+            tasks: [...TASKS],
+            feedback: this.feedbackEnabled,
             model: { id: this.brand.id, name: this.brand.name, available: usable > 0 },
             privateMode: this.privateMode,
             refreshedAt: this.catalog?.refreshedAt ?? null,
@@ -1720,6 +1915,9 @@ export class Router {
           ok,
           status: ok ? "ok" : "degraded",
           checkedAt: new Date().toISOString(),
+          api: API_VERSION,
+          tasks: [...TASKS],
+          feedback: this.feedbackEnabled,
           backends,
           ...(this.catalog
             ? {
@@ -1806,14 +2004,32 @@ export class Router {
         if (body instanceof Response) return body;
         const parsed = parseRequest(body);
         if (parsed instanceof Response) return parsed;
-        const response = await this.complete(parsed, scope.signal);
+        const task = parseTask(request.headers.get(TASK_HEADER));
+        if (task === "ack") {
+          if ((Array.isArray(parsed.tools) && parsed.tools.length > 0) || (parsed.tool_choice !== undefined && parsed.tool_choice !== null && parsed.tool_choice !== "none")) {
+            return structuredError("Quick acknowledgments cannot use tools", 400, "tools_not_allowed");
+          }
+          const cap = typeof parsed.max_tokens === "number" && parsed.max_tokens > 0 ? Math.min(parsed.max_tokens, ACK_MAX_TOKENS) : ACK_MAX_TOKENS;
+          parsed.max_tokens = cap;
+          // Thinking first would delay (or leak into) the spoken reply. Kilo
+          // honors reasoning.effort "none"; a caller's own setting wins.
+          if (parsed.reasoning === undefined && parsed.reasoning_effort === undefined) parsed.reasoning = { effort: "none" };
+        }
+        const requestId = crypto.randomUUID().replace(/-/g, "");
+        const response = await this.complete(parsed, scope.signal, task);
         if (scope.signal.aborted) {
           void response.body?.cancel().catch(() => undefined);
           throw abortError(scope.signal);
         }
+        const selector = this.answeredBy.get(response);
+        if (selector && this.feedbackEnabled) this.feedback.track(requestId, selector, task);
         const result = responseWithDeadline(response, scope);
         transferred = true;
-        return result;
+        const headers = new Headers(result.headers);
+        headers.set(REQUEST_ID_HEADER, requestId);
+        const clientId = request.headers.get(CLIENT_ID_HEADER);
+        if (clientId && /^[A-Za-z0-9_.:-]{1,128}$/.test(clientId)) headers.set(CLIENT_ID_HEADER, clientId);
+        return new Response(result.body, { status: result.status, statusText: result.statusText, headers });
       } catch (error) {
         if (scope.signal.aborted || isAbort(error)) {
           return structuredError("Backend request timed out or cancelled", 504, "timeout", "api_error");

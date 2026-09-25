@@ -253,3 +253,151 @@ describe("first run", () => {
     expect(hung.calls).toEqual(["hung:free", "fast:free"]);
   });
 });
+
+import { FeedbackStore, modelTier, orderForTask, parseTask } from "../src/tasks";
+
+describe("task routing", () => {
+  it("parses the task header: missing = none, unknown = reason", () => {
+    expect(parseTask(null)).toBeUndefined();
+    expect(parseTask("ack")).toBe("ack");
+    expect(parseTask("TITLE")).toBe("title");
+    expect(parseTask("something-new")).toBe("reason");
+  });
+
+  it("tiers models by size and name", () => {
+    const tier = (id: string, contextWindow = 200_000) => modelTier({ id, contextWindow });
+    expect(tier("liquid/lfm-2.5-2.6b:free", 65_536)).toBe("light");
+    expect(tier("qwen/qwen3.8-27b:free")).toBe("ok");
+    expect(tier("nvidia/nemotron-3-super-120b-a12b:free")).toBe("strong");
+    expect(tier("nex-agi/nex-n2.5-mini:free")).toBe("light");
+    expect(tier("nex-agi/nex-n2.5-pro:free")).toBe("strong");
+    expect(tier("z-ai/glm-5.2:free", 32_768)).toBe("light");
+    expect(tier("big-pickle")).toBe("ok");
+  });
+
+  it("reason keeps light models last; title puts them first; ack drops the sidecar and sorts by speed", () => {
+    const routes = [
+      { model: model("kilo", "tiny-2b:free"), latencyMs: 300 },
+      { model: model("opencode", "opencode/big-pickle"), latencyMs: 100 },
+      { model: model("kilo", "big-120b:free"), latencyMs: 900 },
+    ];
+    expect(orderForTask("reason", routes).map((r) => r.model.id)).toEqual(["opencode/big-pickle", "big-120b:free", "tiny-2b:free"]);
+    expect(orderForTask("title", routes)[0].model.id).toBe("tiny-2b:free");
+    expect(orderForTask("ack", routes).map((r) => r.model.id)).toEqual(["tiny-2b:free", "big-120b:free"]);
+    expect(orderForTask("tool_repair", routes)[0].model.id).toBe("big-120b:free");
+  });
+
+  it("feedback moves a model at most 30% of the list and only after 20 events", () => {
+    const store = new FeedbackStore({ minEvents: 20 });
+    const ids = Array.from({ length: 10 }, (_, i) => `m${i}`);
+    for (let i = 0; i < 25; i++) {
+      store.track(`req-bad-${i}0000`, "m0", "reason");
+      store.record(`req-bad-${i}0000`, "bad_tool_json");
+      store.track(`req-ok-${i}00000`, "m5", "reason");
+      store.record(`req-ok-${i}00000`, "ok");
+    }
+    const out = store.adjust("reason", ids.map((id) => ({ model: model("kilo", id) })), (r) => r.model.id).map((r) => r.model.id);
+    expect(out.indexOf("m0")).toBe(3);
+    expect(out.length).toBe(10);
+    expect(store.adjust("chat", ids.map((id) => ({ model: model("kilo", id) })), (r) => r.model.id).map((r) => r.model.id)).toEqual(ids);
+  });
+
+  it("feedback is idempotent and drops unknown request ids", () => {
+    const store = new FeedbackStore({ minEvents: 1 });
+    store.track("abcdefgh1", "m", "chat");
+    expect(store.record("abcdefgh1", "ok")).toBe("recorded");
+    expect(store.record("abcdefgh1", "ok")).toBe("duplicate");
+    expect(store.record("zzzzzzzz9", "ok")).toBe("unknown_request");
+    expect(store.badRate("chat", "m")).toBe(0);
+  });
+});
+
+describe("api v1 endpoints", () => {
+  async function brandRouter(kiloComplete: (id: string) => Promise<Response>, extra: Record<string, unknown> = {}) {
+    const catalog = new ModelCatalog();
+    const kilo = fakeBackend("kilo", ["slow:free", "fast:free", "third:free"], kiloComplete);
+    const router = createRouter({ adapters: [kilo], catalog, probeOnRefresh: false, failoverBackoffMs: 1, brand: { id: "dani-free-auto", name: "Dani Free Auto" }, ...extra });
+    await router.refreshCatalog();
+    return { router, kilo, catalog };
+  }
+  const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
+    new Request(`http://local${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+
+  it("/health reports api 1 and the task list", async () => {
+    const { router } = await brandRouter(async (id) => completion(id));
+    const health = await (await router.handle(new Request("http://local/health"))).json();
+    expect(health.api).toBe(1);
+    expect(health.tasks).toEqual(["ack", "reason", "tool_plan", "tool_repair", "summary", "chat", "title"]);
+  });
+
+  it("returns a request id and accepts feedback for it, once", async () => {
+    const { router } = await brandRouter(async (id) => completion(id));
+    const response = await router.handle(chat());
+    const id = response.headers.get("x-dani-request-id")!;
+    expect(id).toMatch(/^[a-f0-9]{32}$/);
+    const first = await router.handle(post("/v1/feedback", { v: 1, request_id: id, task: "chat", outcome: "ok" }), "127.0.0.1");
+    expect(first.status).toBe(200);
+    expect((await router.handle(post("/v1/feedback", { v: 1, request_id: id, outcome: "ok" }), "127.0.0.1")).status).toBe(200);
+    expect((await router.handle(post("/v1/feedback", { v: 1, request_id: id, outcome: "great" }), "127.0.0.1")).status).toBe(400);
+    expect((await router.handle(post("/v1/feedback", { v: 1, request_id: id, outcome: "ok" }), "10.0.0.2")).status).toBe(403);
+  });
+
+  it("feedback is off in Private mode", async () => {
+    const { router } = await brandRouter(async (id) => completion(id), { privateMode: true });
+    expect((await router.handle(post("/v1/feedback", { v: 1, request_id: "abcdefgh12", outcome: "ok" }), "127.0.0.1")).status).toBe(204);
+  });
+
+  it("ack rejects tools and caps output", async () => {
+    let seenMax = 0;
+    const { router } = await brandRouter(async (id) => completion(id));
+    const refused = await router.handle(chat({ tools: [{ type: "function", function: { name: "x" } }] } as Partial<ChatRequest>));
+    expect(refused.status).toBe(200); // no task header: normal auto
+    const withTask = new Request("http://local/v1/chat/completions", {
+      method: "POST", headers: { "content-type": "application/json", "x-dani-task": "ack" },
+      body: JSON.stringify({ model: "auto", messages: [{ role: "user", content: "hi" }], tools: [{ type: "function", function: { name: "x" } }] }),
+    });
+    const rejected = await router.handle(withTask);
+    expect(rejected.status).toBe(400);
+    expect((await rejected.json()).error.code).toBe("tools_not_allowed");
+    void seenMax;
+  });
+
+  it("ack hedges two routes, first byte wins, loser is cancelled and not marked failed", async () => {
+    let slowAborted = false;
+    const { router, catalog } = await brandRouter(async (id) => {
+      if (id === "slow:free") {
+        return new Response(new ReadableStream({ cancel() { slowAborted = true; } }), { headers: { "content-type": "text/event-stream" } });
+      }
+      return new Response(`data: ${JSON.stringify({ id: "x", model: id, choices: [{ index: 0, delta: { content: "On it" } }] })}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } });
+    });
+    const request = new Request("http://local/v1/chat/completions", {
+      method: "POST", headers: { "content-type": "application/json", "x-dani-task": "ack" },
+      body: JSON.stringify({ model: "auto", stream: true, messages: [{ role: "user", content: "book a table" }] }),
+    });
+    const response = await router.handle(request);
+    const text = await response.text();
+    expect(text).toContain("On it");
+    expect(text).toContain('"model":"dani-free-auto"');
+    await Bun.sleep(10);
+    expect(slowAborted).toBe(true);
+    expect(catalog.get("kilo/slow:free")!.failures).toBe(0);
+  });
+
+  it("ack times out with 504 ack_timeout", async () => {
+    const { router } = await brandRouter(() => new Promise<Response>(() => undefined), { ackTimeoutMs: 100 });
+    const request = new Request("http://local/v1/chat/completions", {
+      method: "POST", headers: { "content-type": "application/json", "x-dani-task": "ack" },
+      body: JSON.stringify({ model: "auto", stream: true, messages: [{ role: "user", content: "hi" }] }),
+    });
+    const started = Date.now();
+    const response = await router.handle(request);
+    expect(response.status).toBe(504);
+    expect((await response.json()).error.code).toBe("ack_timeout");
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("warm answers 204 at once", async () => {
+    const { router } = await brandRouter(async (id) => completion(id));
+    expect((await router.handle(post("/v1/warm", { task: "ack" }))).status).toBe(204);
+  });
+});

@@ -5,6 +5,7 @@ import { ModelCatalog } from "./catalog";
 import { startRefreshScheduler } from "./refresh-scheduler";
 import { catalogAdapters, opencodeEnabled, startServer } from "./server";
 import { OpenCodeSidecar } from "./opencode-sidecar";
+import { FeedbackStore } from "./tasks";
 import { dirname } from "node:path";
 import { fallbackPorts, listenWithFallback, loadOrCreateInstallKey, readInstallKey, readLiveRuntime, removeRuntime, writeRuntime } from "./install";
 
@@ -219,6 +220,7 @@ async function runStart(config: DaniFreeConfig): Promise<number> {
     catalog,
     adapters: catalogAdapters(sidecar ? { opencode: sidecar } : {}),
     brand,
+    feedback: new FeedbackStore({ path: `${dirname(config.catalogPath)}/feedback.json` }),
     onQuotaChange: (backend, exhausted) => {
       const label = exposeModels ? backend : backend === "opencode" ? "primary" : "fallback";
       console.log(exhausted ? `[catalog] ${label} free pool used up, switching to the next pool` : `[catalog] ${label} free pool is back`);
