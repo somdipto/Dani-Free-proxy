@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -100,6 +100,10 @@ export interface SidecarOptions {
   binary?: string;
   /** Never download OpenCode. */
   noInstall?: boolean;
+  /** Read-only, app-bundled engine executable. Installed privately on first start. */
+  seedBinary?: string;
+  /** SHA-256 of the exact executable bytes, pinned by the signed app build. */
+  seedSha256?: string;
   log?: (line: string) => void;
   fetch?: typeof fetch;
 }
@@ -232,7 +236,8 @@ export class OpenCodeSidecar {
    * DANI_FREE_ENGINE_AUTOUPDATE=0 turns this off.
    */
   async checkForUpdate(options: { now?: () => number; signal?: AbortSignal } = {}): Promise<EngineUpdateResult> {
-    if (process.env.DANI_FREE_ENGINE_AUTOUPDATE === "0" || this.options.binary) return { status: "disabled" };
+    if (process.env.DANI_FREE_ENGINE_AUTOUPDATE === "0" ||
+      (process.env.DANI_FREE_RELEASE === "1" && process.env.DANI_FREE_ENGINE_AUTOUPDATE !== "1") || this.options.binary) return { status: "disabled" };
     const now = options.now?.() ?? Date.now();
     const state = this.readState();
     const current = this.activeVersion;
@@ -343,9 +348,40 @@ export class OpenCodeSidecar {
     return join(this.root, "work");
   }
 
+  /** Copy a pinned seed into the mutable home without changing a working newer engine. */
+  private installSeed(): string {
+    const source = this.options.seedBinary;
+    const digest = this.options.seedSha256?.toLowerCase();
+    if (!source || !digest || !/^[0-9a-f]{64}$/.test(digest)) throw new Error("engine seed needs a binary and pinned SHA-256");
+    const target = this.binaryFor(OPENCODE_VERSION);
+    const hash = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
+    // A previously verified copy stays available if an app update's seed is lost.
+    if (existsSync(target) && hash(target) === digest) return target;
+    if (!existsSync(source) || !statSync(source).isFile() || hash(source) !== digest) throw new Error("engine seed failed its checksum");
+    mkdirSync(join(this.root, "bin", OPENCODE_VERSION), { recursive: true, mode: 0o700 });
+    const staging = `${target}.${process.pid}-${randomBytes(4).toString("hex")}.tmp`;
+    try {
+      copyFileSync(source, staging);
+      if (hash(staging) !== digest) throw new Error("copied engine seed failed its checksum");
+      if (process.platform !== "win32") chmodSync(staging, 0o755);
+      // Keep the old pinned version intact until this candidate is verified.
+      // A digest mismatch at the same version is not an authorized upgrade.
+      if (existsSync(target)) throw new Error("installed engine seed failed its checksum");
+      renameSync(staging, target);
+    } finally {
+      rmSync(staging, { force: true });
+    }
+    return target;
+  }
+
   /** The binary to run, installing the pinned release when needed. */
   async ensureBinary(signal?: AbortSignal): Promise<string> {
     if (this.options.binary) return this.options.binary;
+    if (this.options.seedBinary || this.options.seedSha256) {
+      // A newer verified engine remains active; seed failure must not erase it.
+      if (this.activeVersion !== OPENCODE_VERSION) return this.managedBinary;
+      return this.installSeed();
+    }
     if (existsSync(this.managedBinary)) return this.managedBinary;
     if (this.options.noInstall) throw new Error("OpenCode is not installed and installing is turned off");
     const key = platformKey();

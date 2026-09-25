@@ -592,6 +592,63 @@ describe("engine auto-update", () => {
     expect((await new OpenCodeSidecar({ home, fetch: fetchFn }).checkForUpdate()).status).toBe("no_asset");
   });
 
+  it("installs a signed-app seed atomically without making any network request", async () => {
+    const home = mkdtempSync(joinPath(tmpdir(), "dfseed-"));
+    const source = joinPath(home, "seed");
+    writeFs(source, "engine-bytes");
+    const digest = createHash("sha256").update("engine-bytes").digest("hex");
+    let requests = 0;
+    const sidecar = new OpenCodeSidecar({ home, seedBinary: source, seedSha256: digest, noInstall: true,
+      fetch: (async () => { requests++; throw new Error("network forbidden"); }) as unknown as typeof fetch });
+    const target = await sidecar.ensureBinary();
+    expect(readFs(target, "utf8")).toBe("engine-bytes");
+    expect(target).toBe(sidecar.binaryFor(OPENCODE_VERSION));
+    expect(requests).toBe(0);
+    expect(await sidecar.ensureBinary()).toBe(target);
+    expect(exists(joinPath(home, "engine", "bin", OPENCODE_VERSION, "dani-engine.tmp"))).toBe(false);
+  });
+
+  it("refuses a wrong digest or changed seed, preserving the existing engine", async () => {
+    const home = mkdtempSync(joinPath(tmpdir(), "dfseed-"));
+    const source = joinPath(home, "seed");
+    writeFs(source, "engine-bytes");
+    const digest = createHash("sha256").update("engine-bytes").digest("hex");
+    const sidecar = new OpenCodeSidecar({ home, seedBinary: source, seedSha256: digest, noInstall: true });
+    const target = await sidecar.ensureBinary();
+    writeFs(source, "mutated");
+    expect(await sidecar.ensureBinary()).toBe(target);
+    expect(readFs(target, "utf8")).toBe("engine-bytes");
+    const bad = new OpenCodeSidecar({ home: mkdtempSync(joinPath(tmpdir(), "dfseed-")), seedBinary: source, seedSha256: digest, noInstall: true });
+    expect(bad.ensureBinary()).rejects.toThrow("checksum");
+    expect(exists(bad.binaryFor(OPENCODE_VERSION))).toBe(false);
+    const noPath = new OpenCodeSidecar({ home: mkdtempSync(joinPath(tmpdir(), "dfseed-")), seedSha256: digest, noInstall: true });
+    expect(noPath.ensureBinary()).rejects.toThrow("needs a binary");
+  });
+
+  it("keeps a newer known-good engine when the app seed is missing", async () => {
+    const home = mkdtempSync(joinPath(tmpdir(), "dfseed-"));
+    const sidecar = new OpenCodeSidecar({ home, seedBinary: joinPath(home, "absent"), seedSha256: "0".repeat(64), noInstall: true });
+    const newer = "99.0.0";
+    mkdirFs(joinPath(home, "engine", "bin", newer), { recursive: true });
+    writeFs(sidecar.binaryFor(newer), "working");
+    writeFs(joinPath(home, "engine", "engine.json"), JSON.stringify({ version: newer }));
+    expect(await sidecar.ensureBinary()).toBe(sidecar.binaryFor(newer));
+  });
+
+  it("disables release GitHub engine checks unless explicitly enabled", async () => {
+    const oldRelease = process.env.DANI_FREE_RELEASE;
+    const oldUpdate = process.env.DANI_FREE_ENGINE_AUTOUPDATE;
+    process.env.DANI_FREE_RELEASE = "1";
+    delete process.env.DANI_FREE_ENGINE_AUTOUPDATE;
+    try {
+      const sidecar = new OpenCodeSidecar({ home: mkdtempSync(joinPath(tmpdir(), "dfseed-")), fetch: (async () => { throw new Error("unexpected network request"); }) as unknown as typeof fetch });
+      expect((await sidecar.checkForUpdate()).status).toBe("disabled");
+    } finally {
+      if (oldRelease === undefined) delete process.env.DANI_FREE_RELEASE; else process.env.DANI_FREE_RELEASE = oldRelease;
+      if (oldUpdate === undefined) delete process.env.DANI_FREE_ENGINE_AUTOUPDATE; else process.env.DANI_FREE_ENGINE_AUTOUPDATE = oldUpdate;
+    }
+  });
+
   it("moves an old install to neutral names and keeps session data out of the install folder", () => {
     const home = mkdtempSync(joinPath(tmpdir(), "dfeng-"));
     const exe = process.platform === "win32" ? "opencode.exe" : "opencode";

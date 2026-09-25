@@ -231,6 +231,8 @@ async function runStart(config: DaniFreeConfig): Promise<number> {
       home: dirname(config.catalogPath),
       binary: process.env.DANI_FREE_OPENCODE_BIN,
       noInstall: process.env.DANI_FREE_OPENCODE_NO_INSTALL === "1",
+      seedBinary: process.env.DANI_FREE_ENGINE_SEED_BIN,
+      seedSha256: process.env.DANI_FREE_ENGINE_SEED_SHA256,
       log: (line) => { if (exposeModels) console.error(line); },
     })
     : undefined;
