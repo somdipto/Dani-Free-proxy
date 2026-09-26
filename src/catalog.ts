@@ -242,8 +242,9 @@ export class ModelCatalog {
   }
 
   /**
-   * Selectors in auto order: healthy first, then fewer recent failures, then
-   * backend priority, then discovery order. Models on a backend that is out of
+   * Selectors in auto order: unheld backend priority first (OpenCode, then Kilo),
+   * then each backend's cooldown/health and discovery order. A prior success
+   * on Kilo must not outrank a usable OpenCode model. Backends out of
    * free quota go last (still there if nothing else is left).
    */
   ranked(backendPriority: readonly string[] = []): string[] {
@@ -262,12 +263,12 @@ export class ModelCatalog {
     return (gated.length > 0 ? gated : live)
       .sort((left, right) =>
         held(left) - held(right)
+        || priority(left.backend) - priority(right.backend)
         || cooling(left) - cooling(right)
         || left.consecutiveFailures - right.consecutiveFailures
-        // Proven models before never-answered ones: on a fresh install the
-        // first turns avoid models that may hang while probes are still running.
+        // Proven models before never-answered ones within the same backend:
+        // don't let a past Kilo success replace an available OpenCode primary.
         || proven(right) - proven(left)
-        || priority(left.backend) - priority(right.backend)
         || left.order - right.order
         || left.selector.localeCompare(right.selector))
       .map((entry) => entry.selector);

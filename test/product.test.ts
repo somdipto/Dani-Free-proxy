@@ -68,6 +68,16 @@ describe("OpenCode primary, Kilo fallback", () => {
     expect(kilo.calls).toEqual([]);
   });
 
+  it("keeps OpenCode first when Kilo succeeded earlier but OpenCode is still usable", async () => {
+    const { router, opencode, kilo, catalog } = await setup(async (id) => completion(id, "from primary"));
+    catalog.recordSuccess("kilo/nex/pro:free", 50);
+    expect(catalog.ranked(["opencode", "kilo"])[0]).toBe("opencode/nemotron-free");
+    const response = await router.handle(chat());
+    expect((await response.json()).choices[0].message.content).toBe("from primary");
+    expect(opencode.calls).toEqual(["nemotron-free"]);
+    expect(kilo.calls).toEqual([]);
+  });
+
   it("switches the whole OpenCode backend to Kilo when its free quota runs out, then switches back after a recovery probe", async () => {
     let quotaGone = true;
     const { router, opencode, kilo, catalog, time } = await setup(async (id) => {
