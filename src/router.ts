@@ -1163,10 +1163,24 @@ export class Router {
     return routes.map((route) => ({ ...route, latencyMs: this.catalog?.get(modelSelectorId(route.model))?.latencyMs }));
   }
 
-  /** Task order, then the bounded feedback adjustment. */
+  /**
+   * Rank within each backend while keeping the founder's OpenCode -> Kilo
+   * order for answer-producing turns. Only invisible title/summary and the
+   * quick-ack lane may select Kilo first for latency.
+   */
   private routesForTask(task: Task | undefined, chain: Route[]): Route[] {
     const ordered = task ? orderForTask(task, this.withLatency(chain)) : chain;
-    return this.feedback.adjust(task ?? "auto", ordered, (route) => modelSelectorId(route.model));
+    const adjusted = this.feedback.adjust(task ?? "auto", ordered, (route) => modelSelectorId(route.model));
+    if (task === "ack" || task === "summary" || task === "title") return adjusted;
+    const held = new Set(this.catalog?.exhaustedBackends() ?? []);
+    return adjusted.map((route, index) => ({ route, index })).sort((left, right) => {
+      const rank = (route: Route) => {
+        if (held.has(route.model.backend)) return this.backendPriority.length;
+        const priority = this.backendPriority.indexOf(route.model.backend);
+        return priority < 0 ? this.backendPriority.length - 1 : priority;
+      };
+      return rank(left.route) - rank(right.route) || left.index - right.index;
+    }).map(({ route }) => route);
   }
 
   /**

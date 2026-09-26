@@ -78,6 +78,20 @@ describe("OpenCode primary, Kilo fallback", () => {
     expect(kilo.calls).toEqual([]);
   });
 
+  it("normal agent task hints keep primary ahead of a stronger fallback model", async () => {
+    for (const task of ["chat", "reason", "tool_plan", "tool_repair"] as const) {
+      const { router, opencode, kilo } = await setup(async (id) => completion(id, "from primary"));
+      const request = new Request("http://local/v1/chat/completions", {
+        method: "POST", headers: { "content-type": "application/json", "x-dani-task": task },
+        body: JSON.stringify({ model: "auto", messages: [{ role: "user", content: "hi" }] }),
+      });
+      const response = await router.handle(request);
+      expect((await response.json()).choices[0].message.content).toBe("from primary");
+      expect(opencode.calls.length).toBe(1);
+      expect(kilo.calls).toEqual([]);
+    }
+  });
+
   it("switches the whole OpenCode backend to Kilo when its free quota runs out, then switches back after a recovery probe", async () => {
     let quotaGone = true;
     const { router, opencode, kilo, catalog, time } = await setup(async (id) => {
