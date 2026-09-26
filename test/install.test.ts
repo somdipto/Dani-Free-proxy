@@ -138,6 +138,13 @@ describe("dani-free start (real process)", () => {
       expect((await answer.json()).choices[0].message.content).toBe("hello");
       const runtime = JSON.parse(readFileSync(join(home, "runtime.json"), "utf8"));
       expect(runtime.port).toBe(ready.port);
+      // The embedding app exports DANI_FREE_PORT=0 to start on a free port. Client
+      // commands must follow runtime.json instead of trying to dial port zero.
+      const commandEnv = { ...process.env, DANI_FREE_HOME: home, DANI_FREE_CONFIG: "", DANI_FREE_PORT: "0" };
+      for (const command of ["status", "refresh"]) {
+        const client = Bun.spawn({ cmd: [process.execPath, "run", join(import.meta.dir, "..", "src", "cli.ts"), command], env: commandEnv });
+        expect(await client.exited).toBe(0);
+      }
       child.kill("SIGTERM");
       await child.exited;
       expect(existsSync(join(home, "runtime.json"))).toBe(false);

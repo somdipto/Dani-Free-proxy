@@ -364,7 +364,9 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
   if (parsed.command !== "start") {
     // Client commands follow the running proxy (it may have moved port) and use this install's key.
     const runtime = readLiveRuntime(config.runtimePath);
-    if (runtime && parsed.port === undefined && process.env.DANI_FREE_PORT === undefined) config.port = runtime.port;
+    // Port 0 requests an ephemeral listening port, not an endpoint for client commands.
+    // Keep a positive explicit CLI/env port as the caller's override.
+    if (runtime && parsed.port === undefined && (process.env.DANI_FREE_PORT === undefined || process.env.DANI_FREE_PORT === "0")) config.port = runtime.port;
     if (!config.apiKey) config.apiKey = readInstallKey(config.apiKeyFile);
   }
   switch (parsed.command) {
