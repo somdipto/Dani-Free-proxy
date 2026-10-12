@@ -1341,7 +1341,7 @@ export class Router {
     const recovered: string[] = [];
     for (const backendId of this.catalog.backendsDueForProbe()) {
       const adapter = this.findAdapter(backendId);
-      if (!adapter) continue;
+      if (!adapter || adapter.backgroundInferenceAllowed===false) continue;
       let models: BackendModel[] = [];
       try {
         models = await this.modelsFor(adapter, signal);
@@ -1377,7 +1377,7 @@ export class Router {
   async refreshCatalog(signal?: AbortSignal): Promise<RefreshSummary | undefined> {
     if (!this.catalog) return undefined;
     this.modelCache.clear();
-    const prober = this.probeOnRefresh
+    const prober = this.probeOnRefresh && !this.adapters.some(adapter=>adapter.backgroundInferenceAllowed===false)
       ? (adapter: BackendAdapter, model: BackendModel, probeSignal: AbortSignal) => this.probe(adapter, model, probeSignal)
       : undefined;
     const summary = await this.catalog.refresh(this.adapters, { signal, prober, probeConcurrency: 4 });
@@ -2014,6 +2014,10 @@ export class Router {
             tasks: [...TASKS],
             feedback: this.feedbackEnabled,
             model: { id: this.brand.id, name: this.brand.name, available: usable > 0 },
+            readiness: this.adapters.some(a => a.backgroundInferenceAllowed === false) ? {
+              discovery: "metadata", inference: "unverified",
+              engine: "starts on first real request; sleeps after 60 seconds without active requests",
+            } : undefined,
             privateMode: this.privateMode,
             refreshedAt: this.catalog?.refreshedAt ?? null,
           });

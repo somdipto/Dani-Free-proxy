@@ -42,7 +42,7 @@ export function defaultAdapters(): BackendAdapter[] {
 
 export interface CatalogAdapterOptions {
   /** Managed `opencode serve` sidecar; its live URL and password feed the OpenCode adapter. */
-  opencode?: { baseUrl: string | undefined; password: string };
+  opencode?: { baseUrl: string | undefined; password: string; managed?: import("./adapters/opencode").OpenCodeAdapterOptions["managed"] };
 }
 
 /**
@@ -58,7 +58,7 @@ export function catalogAdapters(options: CatalogAdapterOptions = {}): BackendAda
   if (opencodeEnabled()) {
     const sidecar = options.opencode;
     adapters.push(sidecar
-      ? new OpenCodeAdapter({ resolveBaseUrl: () => sidecar.baseUrl, apiKey: sidecar.password })
+      ? new OpenCodeAdapter({ resolveBaseUrl: () => sidecar.baseUrl, apiKey: sidecar.password, managed:sidecar.managed })
       : new OpenCodeAdapter());
   }
   adapters.push(new KiloAdapter());

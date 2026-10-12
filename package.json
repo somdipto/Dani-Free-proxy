@@ -1,6 +1,6 @@
 {
   "name": "dani-free",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Local OpenAI-compatible router with a six-model free-tier failover chain (OpenCode + Kilo Code).",

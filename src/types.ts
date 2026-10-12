@@ -49,6 +49,8 @@ export interface ChatResponse {
 }
 
 export interface BackendAdapter {
+  /** Managed sleeping engines must never be woken by background probes. */
+  readonly backgroundInferenceAllowed?: boolean;
   readonly id: BackendId;
   listModels(signal?: AbortSignal): Promise<BackendModel[]>;
   health(signal?: AbortSignal): Promise<BackendHealth>;

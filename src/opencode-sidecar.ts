@@ -394,6 +394,7 @@ export class OpenCodeSidecar {
   /** Start (or restart) `opencode serve` and resolve with its base URL once healthy. */
   async start(signal?: AbortSignal): Promise<string> {
     if (this.disposed) throw new Error("sidecar is shut down");
+    if(this.child && this.url)return this.url;
     const binary = await this.ensureBinary(signal);
     // Shutdown may have happened while the download ran.
     if (this.disposed) throw new Error("sidecar is shut down");
@@ -421,8 +422,8 @@ export class OpenCodeSidecar {
       child.stderr?.on("data", () => undefined);
       child.once("error", (error) => { clearTimeout(timer); reject(error); });
       child.once("exit", (code) => { clearTimeout(timer); reject(new Error(`OpenCode exited during start (code ${code})`)); });
-    }).catch((error) => {
-      child.kill();
+    }).catch(async (error) => {
+      await this.sleep();
       throw error;
     });
     this.url = url;
@@ -430,8 +431,8 @@ export class OpenCodeSidecar {
       if (this.child !== child) return;
       this.url = undefined;
       if (this.stopping) return;
-      this.log("[free-backend] sidecar stopped, restarting");
-      setTimeout(() => { if (!this.stopping && !this.disposed) void this.start().catch(() => undefined); }, RESTART_DELAY_MS);
+      this.log("[free-backend] sidecar stopped; next request will restart");
+      // Next real request restarts the engine; never respawn an idle/crashed engine.
     });
     return url;
   }
@@ -470,6 +471,16 @@ export class OpenCodeSidecar {
   async restart(): Promise<string> {
     this.halt();
     return this.start();
+  }
+
+  /** Idle shutdown. Await exit before a subsequent first-use start can acquire it. */
+  async sleep():Promise<void>{
+    const child=this.child;this.halt();
+    if(child && child.exitCode===null){await new Promise<void>((resolve,reject)=>{
+      const timer=setTimeout(()=>{child.kill("SIGKILL");},2000);
+      const hard=setTimeout(()=>reject(new Error("Engine teardown unconfirmed; restart blocked")),5000);
+      child.once("exit",()=>{clearTimeout(timer);clearTimeout(hard);resolve();});
+    });}
   }
 
   /** Stop for good (proxy shutdown). Synchronous, so it finishes before process.exit. */

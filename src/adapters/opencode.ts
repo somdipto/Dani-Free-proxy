@@ -430,6 +430,7 @@ export interface OpenCodeAdapterOptions {
   fetch?: FetchFn;
   /** Live sidecar location (a managed sidecar can move ports on restart). Wins over baseUrl. */
   resolveBaseUrl?: () => string | undefined;
+  managed?: { discover: (signal?:AbortSignal)=>Promise<BackendModel[]>; acquire:(signal?:AbortSignal)=>Promise<()=>void> };
 }
 
 function parseBase(value: string | undefined): URL | null {
@@ -448,6 +449,8 @@ function parseBase(value: string | undefined): URL | null {
 
 export class OpenCodeAdapter implements BackendAdapter {
   readonly id = BACKEND;
+  readonly backgroundInferenceAllowed: boolean;
+  private readonly managed?: OpenCodeAdapterOptions["managed"];
   private readonly staticBaseUrl: URL | null;
   private readonly resolveBaseUrl?: () => string | undefined;
   private readonly basicAuth: string | undefined;
@@ -457,6 +460,8 @@ export class OpenCodeAdapter implements BackendAdapter {
     const configuredBase = options.baseUrl ?? process.env.DANI_FREE_OPENCODE_BASE_URL ?? DEFAULT_BASE_URL;
     this.staticBaseUrl = parseBase(configuredBase);
     this.resolveBaseUrl = options.resolveBaseUrl;
+    this.managed=options.managed;
+    this.backgroundInferenceAllowed=!options.managed;
 
     const configuredKey = options.apiKey ?? process.env.DANI_FREE_OPENCODE_API_KEY;
     const trimmed = configuredKey?.trim();
@@ -478,6 +483,7 @@ export class OpenCodeAdapter implements BackendAdapter {
   }
 
   async listModels(signal?: AbortSignal): Promise<BackendModel[]> {
+    if(this.managed)return this.managed.discover(signal);
     if (!this.baseUrl) return [];
 
     let response: Response;
@@ -529,6 +535,7 @@ export class OpenCodeAdapter implements BackendAdapter {
 
   async health(signal?: AbortSignal): Promise<BackendHealth> {
     const checkedAt = new Date().toISOString();
+    if(this.managed){try{const models=await this.listModels(signal);return {backend:BACKEND,configured:true,healthy:models.length>0,checkedAt,reason:this.baseUrl?"Engine running; model metadata available":"Engine sleeping; starts on first real request (inference availability unverified)"};}catch{return {backend:BACKEND,configured:true,healthy:false,checkedAt,reason:"Model discovery unavailable; engine not started"};}}
     if (!this.baseUrl) {
       return {
         backend: BACKEND,
@@ -826,6 +833,11 @@ export class OpenCodeAdapter implements BackendAdapter {
   }
 
   async complete(request: ChatRequest, model: BackendModel, signal: AbortSignal): Promise<Response> {
+    const release=await this.managed?.acquire(signal);
+    try{return await this.completeStarted(request,model,signal);}finally{release?.();}
+  }
+
+  private async completeStarted(request: ChatRequest, model: BackendModel, signal: AbortSignal): Promise<Response> {
     const rawId = rawModelId(model.id);
     if (!rawId) throw new OpenCodeError("OpenCode model id is empty", { status: 422, code: "invalid_model" });
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import {IdleEngine} from "./idle-engine";
+import {discoverOpenCodeModels} from "./offline-models";
 import type { DaniFreeConfig } from "./config";
 import { applyBackendEnvironment, loadConfig } from "./config";
 import { ModelCatalog } from "./catalog";
@@ -236,10 +238,12 @@ async function runStart(config: DaniFreeConfig): Promise<number> {
       log: (line) => { if (exposeModels) console.error(line); },
     })
     : undefined;
+  const engine=sidecar ? new IdleEngine(()=>sidecar.start(),()=>sidecar.sleep()) : undefined;
+  const managedSidecar=sidecar && engine ? {get baseUrl(){return sidecar.baseUrl;},password:sidecar.password,managed:{discover:discoverOpenCodeModels,acquire:(signal?:AbortSignal)=>engine.acquire(signal)}} : undefined;
   const ports = config.strictPort ? [config.port] : fallbackPorts(config.port);
   const listened = listenWithFallback(ports, (port) => startServer({
     catalog,
-    adapters: catalogAdapters(sidecar ? { opencode: sidecar } : {}),
+    adapters: catalogAdapters(managedSidecar ? { opencode: managedSidecar } : {}),
     brand,
     feedback: new FeedbackStore({ path: feedbackPath, sealKey: stateKey }),
     onQuotaChange: (backend, exhausted) => {
@@ -273,29 +277,8 @@ async function runStart(config: DaniFreeConfig): Promise<number> {
   console.log(`DANI_FREE_READY ${JSON.stringify({ baseUrl, port: started.port, pid: process.pid, apiKeyFile: usingInstallKey ? config.apiKeyFile : null, privateMode: config.privateMode })}`);
   // Boot-time refresh plus a daily one. Chat is served from the saved catalog
   // (or live discovery on a first run) while the refresh runs.
-  let lastEngineCheck = 0;
-  const refreshAll = async () => {
-    // Once a day: adopt a newer verified engine release (no app update or code push needed).
-    if (sidecar?.baseUrl && Date.now() - lastEngineCheck > 20 * 60 * 60 * 1000) {
-      lastEngineCheck = Date.now();
-      const update = await sidecar.checkForUpdate().catch(() => undefined);
-      if (update && exposeModels) console.error(`[free-backend] engine update: ${JSON.stringify(update)}`);
-      else if (update?.status === "updated") console.log("[catalog] primary free pool engine updated");
-    }
-    // New OpenCode models appear on their own: refresh OpenCode's list first, then re-list every backend.
-    if (sidecar?.baseUrl) await sidecar.refreshModels().catch(() => false);
-    return started.router.refreshCatalog();
-  };
-  if (sidecar) {
-    void sidecar.start().then(
-      // The boot refresh may still be running without the sidecar: wait for it, then list again.
-      () => started.router.refreshCatalog().catch(() => undefined).then(() => refreshAll()).then(
-        (summary) => { if (summary) console.log(`[catalog] refreshed: ${summary.visible}/${summary.total} models usable`); },
-        () => undefined,
-      ),
-      (error) => console.error(exposeModels ? `[free-backend] could not start: ${error instanceof Error ? error.message : String(error)}` : "[catalog] primary free pool unavailable, using fallback pool"),
-    );
-  }
+  // Discovery is metadata-only. Engine updates/restarts cannot run behind active chats.
+  const refreshAll = () => started.router.refreshCatalog();
   let lastDay = new Date().toDateString();
   const recovery = setInterval(() => {
     void started.router.probeRecovery().catch(() => undefined);
@@ -319,11 +302,12 @@ async function runStart(config: DaniFreeConfig): Promise<number> {
   });
   let shuttingDown = false;
   let watchdog: ReturnType<typeof setInterval> | undefined;
-  const shutdown = () => {
+  const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
     scheduler.stop();
     clearInterval(recovery);
+    try { await engine?.stop(); } catch { /* bounded teardown was attempted */ }
     sidecar?.stop();
     if (watchdog) clearInterval(watchdog);
     removeRuntime(config.runtimePath);
